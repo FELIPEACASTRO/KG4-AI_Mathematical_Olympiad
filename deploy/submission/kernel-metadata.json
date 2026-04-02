@@ -1,0 +1,20 @@
+{
+  "id": "felipe1983/aimo3-kg4-submission",
+  "title": "AIMO3 KG4 Submission",
+  "code_file": "submission.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "competition_sources": [
+    "ai-mathematical-olympiad-progress-prize-3"
+  ],
+  "dataset_sources": [],
+  "kernel_sources": [
+    "felipe1983/aimo3-utility-notebook-dependency-install-1-2"
+  ],
+  "model_sources": [
+    "deepseek-ai/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b/2"
+  ]
+}

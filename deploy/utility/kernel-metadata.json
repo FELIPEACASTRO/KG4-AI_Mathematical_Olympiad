@@ -1,0 +1,14 @@
+{
+  "id": "felipe1983/aimo3-utility-notebook-dependency-install-1-2",
+  "title": "AIMO3 Utility Notebook Dependency Install 1/2",
+  "code_file": "utility_setup.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "competition_sources": [],
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

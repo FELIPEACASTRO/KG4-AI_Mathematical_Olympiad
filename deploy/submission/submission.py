@@ -1,5 +1,5 @@
 """
-AIMO3 Competition Submission Notebook — Notebook 2/2
+AIMO3 Competition Submission Notebook -- Notebook 2/2
 ====================================================
 This is the main inference notebook for the AI Mathematical Olympiad Progress Prize 3.
 
@@ -31,7 +31,7 @@ try:
 except ImportError:
     pl = None
 
-# ─── Logging Setup ────────────────────────────────────────────────────────────
+# --- Logging Setup ------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -42,15 +42,15 @@ logger = logging.getLogger('aimo3')
 GLOBAL_START = time.time()
 logger.info("AIMO3 Submission starting...")
 
-# ─── Install dependencies from utility notebook ──────────────────────────────
+# --- Install dependencies from utility notebook ------------------------------
 # On Kaggle, the utility notebook output contains pre-built wheels
 UTILITY_DIR = "/kaggle/input/aimo3-utility-notebook-dependency-install-1-2"
 if os.path.exists(UTILITY_DIR):
     logger.info(f"Installing deps from utility notebook: {UTILITY_DIR}")
     os.system(f"pip install --no-index --find-links {UTILITY_DIR} vllm 2>/dev/null")
 
-# ─── Configuration ────────────────────────────────────────────────────────────
-# Model path — adjust based on how the model is attached on Kaggle
+# --- Configuration ------------------------------------------------------------
+# Model path -- adjust based on how the model is attached on Kaggle
 MODEL_PATHS = [
     "/kaggle/input/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b/2",
     "/kaggle/input/deepseek-r1-distill-qwen-32b/transformers/default/1",
@@ -85,7 +85,7 @@ SETUP_TIME = 300             # Model loading time
 CODE_EXEC_TIMEOUT = 30       # Timeout for SymPy verification
 CODE_EXEC_TIMEOUT_HEAVY = 45 # Extended timeout for computationally intensive code
 
-# ─── System Prompt ────────────────────────────────────────────────────────────
+# --- System Prompt ------------------------------------------------------------
 SYSTEM_PROMPT = """You are an expert mathematician solving competition-level olympiad problems.
 
 Rules:
@@ -107,20 +107,20 @@ Important conventions:
 - $\\binom{a}{b} = 0$ if $b > a$, and $\\binom{0}{0} = 1$.
 
 Mathematical strategy tips:
-- The modulus varies by problem (10^5, 5^7, 99991, etc.) — read the problem carefully.
+- The modulus varies by problem (10^5, 5^7, 99991, etc.) -- read the problem carefully.
 - If the answer is naturally smaller than the modulus, return it directly without extra reduction.
-- For very large exponents (e.g. 3^{n!}): use Fermat-Euler theorem — a^{phi(m)} ≡ 1 (mod m) when gcd(a,m)=1.
-- For p-adic valuations of a^n ± b^n: use the Lifting the Exponent Lemma (LTE).
-- For prime factorization of n!: use Legendre's formula — v_p(n!) = sum floor(n/p^k).
+- For very large exponents (e.g. 3^{n!}): use Fermat-Euler theorem -- a^{phi(m)} == 1 (mod m) when gcd(a,m)=1.
+- For p-adic valuations of a^n +- b^n: use the Lifting the Exponent Lemma (LTE).
+- For prime factorization of n!: use Legendre's formula -- v_p(n!) = sum floor(n/p^k).
 - For counting balanced parenthesizations or lattice paths: Catalan numbers C_n = (2n)! / (n!(n+1)!).
-- For polynomial divisibility involving x^n ± 1: factor via cyclotomic polynomials.
+- For polynomial divisibility involving x^n +- 1: factor via cyclotomic polynomials.
 - For combinatorial problems, consider generating functions, inclusion-exclusion, or recursion.
 - For number theory: Chinese Remainder Theorem, Fermat's little theorem, quadratic residues.
 - For geometry: Stewart's theorem, power of a point, radical axes, spiral similarities.
 - For sequences: look for Fibonacci-like structure, Binet's formula, golden ratio.
 - Always double-check: did the problem ask for the answer mod something? Make sure you applied it."""
 
-# Few-shot examples — type-specific for better signal
+# Few-shot examples -- type-specific for better signal
 FEW_SHOT_EXAMPLES = """Here are two solved examples to illustrate the expected format:
 
 Example 1 (Geometry):
@@ -210,7 +210,7 @@ Phase 2 - Computational Verification:
 Write Python code to verify your answer. Wrap code in ```python ... ``` blocks.
 Guidelines for the code:
 - Use sympy for symbolic computation: factorint, totient, mod_inverse, divisor_sigma, cyclotomic_poly.
-- For large numbers, use Python's arbitrary precision integers — do NOT use floating point.
+- For large numbers, use Python's arbitrary precision integers -- do NOT use floating point.
 - For modular arithmetic, use pow(base, exp, mod) for modular exponentiation.
 - For p-adic valuations: sympy.multiplicity(p, n) or manual computation.
 - For prime factorization of n!: Legendre's formula sum(n // p**k for k in range(1, ...)).
@@ -273,7 +273,7 @@ Solve this problem using a COMPUTATIONAL approach:
 
 If computation confirms a value, present your final answer as \\boxed{{ANSWER}}."""
 
-# Verification template — asks model to confirm or disprove a candidate answer
+# Verification template -- asks model to confirm or disprove a candidate answer
 VERIFY_TEMPLATE = """{system}
 
 Problem:
@@ -289,9 +289,9 @@ Your task:
 5. Present your final answer as \\boxed{{ANSWER}} where ANSWER is a non-negative integer between 0 and 99999."""
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # PROBLEM CLASSIFICATION
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 def classify_problem(problem: str) -> str:
     """Classify problem type by keywords. Returns best-guess category."""
@@ -389,9 +389,9 @@ def validate_answer_with_modulus(answer: int, modulus: Optional[int]) -> int:
     return answer
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # ANSWER EXTRACTION
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 def _try_eval_boxed_expr(expr: str) -> Optional[int]:
     """Try to evaluate a LaTeX math expression inside \\boxed{} to an integer.
@@ -425,7 +425,7 @@ def _extract_answer_from_segment(text: str) -> Optional[int]:
     """Extract integer answer from a text segment."""
     if not text:
         return None
-    # \\boxed{...} — handle one level of nested braces (e.g., \boxed{336 \text{...}})
+    # \\boxed{...} -- handle one level of nested braces (e.g., \boxed{336 \text{...}})
     boxed_matches = re.findall(r'\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}', text)
     if boxed_matches:
         raw = boxed_matches[-1].strip().replace(',', '').replace(' ', '')
@@ -497,9 +497,9 @@ def extract_code_blocks(text: str) -> list[str]:
     return [b.strip() for b in blocks if b.strip()]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # CODE EXECUTION (Simple thread-based sandbox)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 def execute_code(code: str, timeout: int = CODE_EXEC_TIMEOUT_HEAVY) -> tuple[bool, str]:
     """Execute Python code in a subprocess with timeout for reliable isolation."""
@@ -596,7 +596,7 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
 def _try_repair_code(code: str, error_msg: str) -> Optional[str]:
     """Attempt to repair common code errors."""
     repaired = code
-    # Missing imports — detect NameError for common math modules
+    # Missing imports -- detect NameError for common math modules
     import_fixes = {
         'sympy': 'import sympy\nfrom sympy import *',
         'numpy': 'import numpy as np',
@@ -623,7 +623,7 @@ def verify_with_code(llm_output: str) -> Optional[int]:
     """Extract and run code from LLM output, return computed answer.
     
     Strategy:
-    1. Try each code block individually (last first — usually the final solution).
+    1. Try each code block individually (last first -- usually the final solution).
     2. If individual blocks fail, try concatenating ALL blocks as one script
        (handles progressive code where later blocks depend on earlier ones).
     3. If a block fails with a fixable error, attempt auto-repair and retry.
@@ -661,9 +661,9 @@ def verify_with_code(llm_output: str) -> Optional[int]:
     return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # VOTING
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 def majority_vote(answers: list[Optional[int]]) -> Optional[int]:
     """Simple majority vote over valid answers."""
@@ -700,18 +700,18 @@ def weighted_vote(text_answers: list[Optional[int]],
         
         if ta is not None and ca is not None:
             if ta == ca:
-                # Text and code agree → highest confidence (4x)
+                # Text and code agree -> highest confidence (4x)
                 counter[ta] += 4
                 total_weight += 4
             else:
-                # Text and code disagree → discard both (cross-validation)
+                # Text and code disagree -> discard both (cross-validation)
                 pass
         elif ca is not None:
-            # Code-only answer → 3x weight
+            # Code-only answer -> 3x weight
             counter[ca] += 3
             total_weight += 3
         elif ta is not None:
-            # Text-only answer → 1x weight
+            # Text-only answer -> 1x weight
             counter[ta] += 1
             total_weight += 1
     
@@ -743,9 +743,9 @@ def select_answer(text_answers: list[Optional[int]],
     return ans if ans is not None else 0
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # SOLVER
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 class AIMOSolver:
     """Main solver: LLM generation + extraction + voting pipeline."""
@@ -769,8 +769,8 @@ class AIMOSolver:
     def _dynamic_gen_count(self, time_budget: float) -> int:
         """Adjust generation count based on available time budget.
         
-        When ahead of schedule → generate more (up to MAX_GENERATIONS)
-        When behind schedule → generate fewer (down to MIN_GENERATIONS)
+        When ahead of schedule -> generate more (up to MAX_GENERATIONS)
+        When behind schedule -> generate fewer (down to MIN_GENERATIONS)
         """
         # Average ~18s per generation on H100 for 8K tokens
         est_time_per_gen = 18
@@ -822,7 +822,7 @@ class AIMOSolver:
                 if det_answer is None:
                     det_answer = ca if ca is not None else ta  # prefer code-verified
 
-        # Phase 2: First batch — diverse exploration (temp=0.6)
+        # Phase 2: First batch -- diverse exploration (temp=0.6)
         num_diverse = effective_gens - 1
         batch1_size = min(8, num_diverse)
         if batch1_size > 0 and time.time() - start < time_budget - 20:
@@ -840,7 +840,7 @@ class AIMOSolver:
                 all_answers.append(extract_answer(t))
                 code_answers.append(verify_with_code(t))
 
-        # Phase 2b: Second batch — adaptive temperature
+        # Phase 2b: Second batch -- adaptive temperature
         batch2_size = num_diverse - batch1_size
         if batch2_size > 0 and time.time() - start < time_budget - 20:
             # Check consensus from first batch to pick temperature
@@ -888,7 +888,7 @@ class AIMOSolver:
                     few_shot=few_shot
                 )
             else:
-                # Fresh template — no bias from previous answers
+                # Fresh template -- no bias from previous answers
                 rtmpl = retry_templates[retry_round % len(retry_templates)]
                 fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
                 if '{few_shot}' in rtmpl:
@@ -905,7 +905,7 @@ class AIMOSolver:
             retry_round += 1
             logger.info(f"  Retry {retry_round}: best={best}, conf={conf:.2f}")
 
-        # Phase 4: Verification — ask model to confirm best answer
+        # Phase 4: Verification -- ask model to confirm best answer
         best_candidate = select_answer(all_answers, code_answers)
         _, pre_verify_conf = weighted_vote(all_answers, code_answers)
         if (pre_verify_conf < 0.8
@@ -938,7 +938,7 @@ class AIMOSolver:
         # Validate against detected modulus
         final = validate_answer_with_modulus(raw_final, modulus)
         if final != raw_final:
-            logger.info(f"  Modulus correction: {raw_final} → {final} (mod {modulus})")
+            logger.info(f"  Modulus correction: {raw_final} -> {final} (mod {modulus})")
         # Final clamping to valid range
         final = max(0, min(99999, final)) if isinstance(final, int) else 0
         
@@ -960,14 +960,14 @@ class AIMOSolver:
             return []
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN — Kaggle Inference Server
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
+# MAIN -- Kaggle Inference Server
+# ===============================================================================
 
 def main():
     """Initialize model and start the Kaggle inference server."""
     
-    # ─── Find Model Path ──────────────────────────────────────────────────
+    # --- Find Model Path --------------------------------------------------
     model_path = None
     for path in MODEL_PATHS:
         if os.path.exists(path):
@@ -998,7 +998,7 @@ def main():
     
     logger.info(f"Using model: {model_path}")
 
-    # ─── Initialize vLLM ──────────────────────────────────────────────────
+    # --- Initialize vLLM --------------------------------------------------
     from vllm import LLM, SamplingParams
 
     logger.info("Initializing vLLM engine...")
@@ -1035,12 +1035,12 @@ def main():
             stop=["</s>", "<|endoftext|>", "<|im_end|>"],
         )
 
-    # ─── Warmup ───────────────────────────────────────────────────────────
+    # --- Warmup -----------------------------------------------------------
     logger.info("Warming up model...")
     warmup_prompt = (
         "Find the remainder when 7^100 is divided by 13.\n"
-        "By Fermat's little theorem, 7^12 ≡ 1 (mod 13).\n"
-        "100 = 12*8 + 4, so 7^100 ≡ 7^4 = 2401 ≡ 2401 mod 13 = 9.\n"
+        "By Fermat's little theorem, 7^12 == 1 (mod 13).\n"
+        "100 = 12*8 + 4, so 7^100 == 7^4 = 2401 == 2401 mod 13 = 9.\n"
         "The answer is \\boxed{9}."
     )
     _ = llm.generate([warmup_prompt], SamplingParams(max_tokens=32, temperature=0))
@@ -1068,10 +1068,10 @@ def main():
             stop=["</s>", "<|endoftext|>", "<|im_end|>"],
         )
 
-    # ─── Create Solver ────────────────────────────────────────────────────
+    # --- Create Solver ----------------------------------------------------
     solver = AIMOSolver(llm, sp_det, make_sp_div, make_sp_explore, make_sp_refine)
 
-    # ─── Prediction Function ──────────────────────────────────────────────
+    # --- Prediction Function ----------------------------------------------
     def predict(*args):
         """Called by the Kaggle evaluation API for each problem.
         
@@ -1104,7 +1104,7 @@ def main():
             logger.error(f"Problem failed: {e}")
             return 0
 
-    # ─── Start Kaggle Inference Server ────────────────────────────────────
+    # --- Start Kaggle Inference Server ------------------------------------
     import kaggle_evaluation.aimo_3_inference_server
     
     inference_server = kaggle_evaluation.aimo_3_inference_server.AIMO3InferenceServer(predict)
