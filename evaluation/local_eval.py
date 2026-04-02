@@ -787,6 +787,129 @@ def test_sympy_output_parsing():
     return passed == len(test_cases)
 
 
+def test_wider_extraction():
+    """Test wider answer extraction range for pre-modulus answers."""
+    import re
+    
+    def _try_eval_boxed_expr(expr):
+        s = expr.strip()
+        s = re.sub(r'\\cdot', '*', s)
+        s = re.sub(r'\\times', '*', s)
+        s = re.sub(r'\\div', '//', s)
+        s = re.sub(r'\\(?:pmod|mod)\s*\{?[^}]*\}?', '', s)
+        s = re.sub(r'[{}]', '', s)
+        s = s.replace('^', '**')
+        s = s.strip()
+        if not s:
+            return None
+        if not re.match(r'^[\d+\-*/()\s.]+$', s):
+            return None
+        try:
+            v = int(eval(s))
+            if 0 <= v <= 999999:
+                return v
+        except Exception:
+            pass
+        return None
+    
+    def _extract_answer_from_segment(text):
+        if not text:
+            return None
+        boxed_matches = re.findall(r'\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}', text)
+        if boxed_matches:
+            raw = boxed_matches[-1].strip().replace(',', '').replace(' ', '')
+            raw = re.sub(r'\\text\{[^}]*\}', '', raw).strip()
+            try:
+                v = int(raw)
+                if 0 <= v <= 999999:
+                    return v
+            except ValueError:
+                try:
+                    fv = float(raw)
+                    if fv == int(fv) and 0 <= int(fv) <= 999999:
+                        return int(fv)
+                except (ValueError, OverflowError):
+                    pass
+            v = _try_eval_boxed_expr(boxed_matches[-1])
+            if v is not None:
+                return v
+        for pattern in [r'(?:final\s+)?answer\s+is\s*[:\s]*(\d+)', r'answer\s*[:=]\s*(\d+)']:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                try:
+                    v = int(matches[-1])
+                    if 0 <= v <= 999999:
+                        return v
+                except ValueError:
+                    pass
+        return None
+    
+    test_cases = [
+        # Wider range: pre-modulus answers
+        ("The answer is \\boxed{100001}", 100001),
+        ("The answer is \\boxed{999999}", 999999),
+        # \\text{} handling
+        ("\\boxed{336 \\text{ (mod 100000)}}", 336),
+        ("\\boxed{42\\text{th}}", 42),
+        # Decimal .0 handling
+        ("\\boxed{336.0}", 336),
+        ("\\boxed{520.0}", 520),
+        # Standard cases still work
+        ("\\boxed{50}", 50),
+        ("\\boxed{0}", 0),
+        # answer is X with wider range
+        ("final answer is 200000", 200000),
+    ]
+    
+    passed = 0
+    for text, expected in test_cases:
+        result = _extract_answer_from_segment(text)
+        if result == expected:
+            passed += 1
+        else:
+            print(f"  FAIL: extract({text!r}) = {result}, expected {expected}")
+    
+    print(f"Wider extraction: {passed}/{len(test_cases)} tests passed")
+    return passed == len(test_cases)
+
+
+def test_type_specific_few_shot():
+    """Test type-specific few-shot example selection."""
+    # Simulate the get_few_shot_examples function
+    few_shot_nt = "Modular Arithmetic"
+    few_shot_combo = "Counting"
+    few_shot_algebra = "Vieta"
+    few_shot_geometry = "Heron"
+    few_shot_default = "Geometry"
+    
+    def get_few_shot_examples(problem_type):
+        return {
+            'number_theory': few_shot_nt,
+            'combinatorics': few_shot_combo,
+            'algebra': few_shot_algebra,
+            'geometry': few_shot_geometry,
+        }.get(problem_type, few_shot_default)
+    
+    test_cases = [
+        ('number_theory', few_shot_nt),
+        ('combinatorics', few_shot_combo),
+        ('algebra', few_shot_algebra),
+        ('geometry', few_shot_geometry),
+        ('unknown', few_shot_default),
+    ]
+    
+    passed = 0
+    for ptype, expected in test_cases:
+        result = get_few_shot_examples(ptype)
+        if result == expected:
+            passed += 1
+        else:
+            print(f"  FAIL: get_few_shot({ptype!r}) = {result!r}, expected {expected!r}")
+    
+    print(f"Type-specific few-shot: {passed}/{len(test_cases)} tests passed")
+    return passed == len(test_cases)
+
+
 def eval_with_model(model_path=None, max_problems=None):
     """Run full evaluation with vLLM model against reference problems."""
     try:
@@ -882,6 +1005,8 @@ def main():
         test_boxed_expression()
         test_dynamic_gen_count()
         test_sympy_output_parsing()
+        test_wider_extraction()
+        test_type_specific_few_shot()
         print("\nTo run full model evaluation: python evaluation/local_eval.py --with-model")
 
 

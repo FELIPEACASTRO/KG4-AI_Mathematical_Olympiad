@@ -119,7 +119,7 @@ Mathematical strategy tips:
 - For sequences: look for Fibonacci-like structure, Binet's formula, golden ratio.
 - Always double-check: did the problem ask for the answer mod something? Make sure you applied it."""
 
-# Few-shot examples (short, high-signal, diverse problem types)
+# Few-shot examples — type-specific for better signal
 FEW_SHOT_EXAMPLES = """Here are two solved examples to illustrate the expected format:
 
 Example 1 (Geometry):
@@ -129,6 +129,56 @@ Solution: Through angle chasing and the constraint that Y lies on line AD, we de
 Example 2 (Combinatorics):
 Problem: A fair coin is tossed within a given time period, and heads come up [...]. Find the expected number of tosses.
 Solution: By linearity of expectation and geometric series, the answer is $\\boxed{50}$."""
+
+FEW_SHOT_NT = """Here are two solved examples to illustrate the expected format:
+
+Example 1 (Modular Arithmetic):
+Problem: Find the remainder when $7^{100}$ is divided by $13$.
+Solution: By Fermat's little theorem ($p=13$ prime), $7^{12} \\equiv 1 \\pmod{13}$. Since $100 = 12 \\cdot 8 + 4$, we get $7^{100} \\equiv 7^4 = 2401 \\equiv 9 \\pmod{13}$. The answer is $\\boxed{9}$.
+
+Example 2 (Euler's Totient):
+Problem: How many integers $1 \\leq n \\leq 100$ are coprime to $100$?
+Solution: $\\phi(100) = 100(1-1/2)(1-1/5) = 40$. The answer is $\\boxed{40}$."""
+
+FEW_SHOT_COMBO = """Here are two solved examples to illustrate the expected format:
+
+Example 1 (Counting):
+Problem: How many 5-letter strings over $\\{A,B,C\\}$ have no two adjacent letters the same?
+Solution: First letter: 3 choices. Each subsequent: 2 choices (any except the previous). Total: $3 \\cdot 2^4 = 48$. The answer is $\\boxed{48}$.
+
+Example 2 (Multinomial):
+Problem: In how many distinct ways can the letters of MISSISSIPPI be arranged?
+Solution: $11!/(4!4!2!1!) = 34650$. The answer is $\\boxed{34650}$."""
+
+FEW_SHOT_ALGEBRA = """Here are two solved examples to illustrate the expected format:
+
+Example 1 (Vieta's Formulas):
+Problem: If $r + s = 5$ and $rs = 3$, find $r^3 + s^3$.
+Solution: $r^3 + s^3 = (r+s)^3 - 3rs(r+s) = 125 - 45 = 80$. The answer is $\\boxed{80}$.
+
+Example 2 (Series):
+Problem: Find $\\sum_{k=1}^{10} k^2$.
+Solution: Using the formula $\\sum k^2 = n(n+1)(2n+1)/6 = 10 \\cdot 11 \\cdot 21/6 = 385$. The answer is $\\boxed{385}$."""
+
+FEW_SHOT_GEOMETRY = """Here are two solved examples to illustrate the expected format:
+
+Example 1 (Heron's Formula):
+Problem: In triangle $ABC$ with $AB=13$, $BC=14$, $CA=15$, find the area.
+Solution: $s = (13+14+15)/2 = 21$. Area $= \\sqrt{21 \\cdot 8 \\cdot 7 \\cdot 6} = \\sqrt{7056} = 84$. The answer is $\\boxed{84}$.
+
+Example 2 (Coordinate Geometry):
+Problem: Find the area of the triangle with vertices $(0,0)$, $(4,0)$, $(0,3)$.
+Solution: Area $= \\frac{1}{2} |4 \\cdot 3| = 6$. The answer is $\\boxed{6}$."""
+
+
+def get_few_shot_examples(problem_type: str) -> str:
+    """Return type-matched few-shot examples for better in-context learning."""
+    return {
+        'number_theory': FEW_SHOT_NT,
+        'combinatorics': FEW_SHOT_COMBO,
+        'algebra': FEW_SHOT_ALGEBRA,
+        'geometry': FEW_SHOT_GEOMETRY,
+    }.get(problem_type, FEW_SHOT_EXAMPLES)
 
 # Prompt templates
 SOLVE_TEMPLATE = """{system}
@@ -363,7 +413,7 @@ def _try_eval_boxed_expr(expr: str) -> Optional[int]:
         return None
     try:
         v = int(eval(s))  # safe: regex-validated to only contain arithmetic
-        if 0 <= v <= 99999:
+        if 0 <= v <= 999999:  # wider range: modulus reduction applied later
             return v
     except Exception:
         pass
@@ -374,16 +424,24 @@ def _extract_answer_from_segment(text: str) -> Optional[int]:
     """Extract integer answer from a text segment."""
     if not text:
         return None
-    # \\boxed{...} — try plain integer first
-    boxed_matches = re.findall(r'\\boxed\{([^}]+)\}', text)
+    # \\boxed{...} — handle one level of nested braces (e.g., \boxed{336 \text{...}})
+    boxed_matches = re.findall(r'\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}', text)
     if boxed_matches:
         raw = boxed_matches[-1].strip().replace(',', '').replace(' ', '')
+        # Strip LaTeX \text{...} annotations
+        raw = re.sub(r'\\text\{[^}]*\}', '', raw).strip()
         try:
             v = int(raw)
-            if 0 <= v <= 99999:
+            if 0 <= v <= 999999:  # wider range: modulus reduction applied later
                 return v
         except ValueError:
-            pass
+            # Handle decimal like "336.0"
+            try:
+                fv = float(raw)
+                if fv == int(fv) and 0 <= int(fv) <= 999999:
+                    return int(fv)
+            except (ValueError, OverflowError):
+                pass
         # Try evaluating as math expression (e.g., 2^{10}, 3*5)
         v = _try_eval_boxed_expr(boxed_matches[-1])
         if v is not None:
@@ -394,7 +452,7 @@ def _extract_answer_from_segment(text: str) -> Optional[int]:
         if matches:
             try:
                 v = int(matches[-1])
-                if 0 <= v <= 99999:
+                if 0 <= v <= 999999:  # wider range: modulus reduction applied later
                     return v
             except ValueError:
                 pass
@@ -442,7 +500,7 @@ def extract_code_blocks(text: str) -> list[str]:
 # CODE EXECUTION (Simple thread-based sandbox)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def execute_code(code: str, timeout: int = CODE_EXEC_TIMEOUT) -> tuple[bool, str]:
+def execute_code(code: str, timeout: int = CODE_EXEC_TIMEOUT_HEAVY) -> tuple[bool, str]:
     """Execute Python code in a subprocess with timeout for reliable isolation."""
     import subprocess
     import tempfile
@@ -497,7 +555,7 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
             if m:
                 try:
                     v = int(float(m.group(1)))
-                    if 0 <= v <= 99999:
+                    if 0 <= v <= 999999:
                         return v
                 except (ValueError, OverflowError):
                     pass
@@ -509,7 +567,7 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
         # Try the whole line as a number first (most common: just "336")
         try:
             v = int(float(stripped))
-            if 0 <= v <= 99999:
+            if 0 <= v <= 999999:
                 return v
         except (ValueError, OverflowError):
             pass
@@ -518,7 +576,7 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
         if frac_m:
             try:
                 v = int(frac_m.group(1))
-                if 0 <= v <= 99999:
+                if 0 <= v <= 999999:
                     return v
             except ValueError:
                 pass
@@ -527,7 +585,7 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
         if m:
             try:
                 v = int(m.group(1))
-                if 0 <= v <= 99999:
+                if 0 <= v <= 999999:
                     return v
             except ValueError:
                 pass
@@ -747,15 +805,21 @@ class AIMOSolver:
         all_answers = []
         code_answers = []
         prob_seed = self._problem_seed(problem)
+        few_shot = get_few_shot_examples(prob_type)
 
         # Phase 1: Deterministic generation (temperature=0)
+        det_answer = None
         if time.time() - start < time_budget - 20:
             fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
             prompt = CODE_TEMPLATE.format(**fmt_kwargs)
             texts = self._gen([prompt], self.sp_det)
             for t in texts:
-                all_answers.append(extract_answer(t))
-                code_answers.append(verify_with_code(t))
+                ta = extract_answer(t)
+                ca = verify_with_code(t)
+                all_answers.append(ta)
+                code_answers.append(ca)
+                if det_answer is None:
+                    det_answer = ca if ca is not None else ta  # prefer code-verified
 
         # Phase 2: First batch — diverse exploration (temp=0.6)
         num_diverse = effective_gens - 1
@@ -766,7 +830,7 @@ class AIMOSolver:
                 tmpl = templates[i % len(templates)]
                 fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
                 if '{few_shot}' in tmpl:
-                    fmt_kwargs['few_shot'] = FEW_SHOT_EXAMPLES
+                    fmt_kwargs['few_shot'] = few_shot
                 prompts.append(tmpl.format(**fmt_kwargs))
             
             sp_div = self.sp_div_factory(prob_seed)
@@ -795,7 +859,7 @@ class AIMOSolver:
                 tmpl = templates[(batch1_size + i) % len(templates)]
                 fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
                 if '{few_shot}' in tmpl:
-                    fmt_kwargs['few_shot'] = FEW_SHOT_EXAMPLES
+                    fmt_kwargs['few_shot'] = few_shot
                 prompts.append(tmpl.format(**fmt_kwargs))
             
             texts = self._gen(prompts, sp_batch2)
@@ -820,14 +884,14 @@ class AIMOSolver:
                 prompt = RETRY_TEMPLATE.format(
                     system=SYSTEM_PROMPT, problem=problem,
                     previous_answer=candidate_info if candidate_info else "unknown",
-                    few_shot=FEW_SHOT_EXAMPLES
+                    few_shot=few_shot
                 )
             else:
                 # Fresh template — no bias from previous answers
                 rtmpl = retry_templates[retry_round % len(retry_templates)]
                 fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
                 if '{few_shot}' in rtmpl:
-                    fmt_kwargs['few_shot'] = FEW_SHOT_EXAMPLES
+                    fmt_kwargs['few_shot'] = few_shot
                 prompt = rtmpl.format(**fmt_kwargs)
             
             sp_retry = self.sp_div_factory(prob_seed + 100 + retry_round)
@@ -860,11 +924,22 @@ class AIMOSolver:
                     code_answers.append(v_code)
             logger.info(f"  Verification: pre_conf={pre_verify_conf:.2f}")
 
+        # Pre-vote modulus reduction: reduce any extracted answer >= modulus
+        if modulus and modulus > 1:
+            all_answers = [a % modulus if a is not None and a >= modulus else a for a in all_answers]
+            code_answers = [a % modulus if a is not None and a >= modulus else a for a in code_answers]
+
         raw_final = select_answer(all_answers, code_answers)
+        # Fallback to deterministic answer instead of returning 0
+        if raw_final == 0 and det_answer is not None and det_answer != 0:
+            raw_final = det_answer
+            logger.info(f"  Using deterministic fallback: {raw_final}")
         # Validate against detected modulus
         final = validate_answer_with_modulus(raw_final, modulus)
         if final != raw_final:
             logger.info(f"  Modulus correction: {raw_final} → {final} (mod {modulus})")
+        # Final clamping to valid range
+        final = max(0, min(99999, final)) if isinstance(final, int) else 0
         
         elapsed = time.time() - start
         _, final_conf = weighted_vote(all_answers, code_answers)
