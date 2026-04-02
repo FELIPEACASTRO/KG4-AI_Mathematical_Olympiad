@@ -88,11 +88,11 @@ VLLM_CONFIG = {
 }
 
 # Inference settings
-NUM_GENERATIONS = 16         # Base solutions per problem (adjusted dynamically)
-MAX_GENERATIONS = 24         # Upper limit when ahead of schedule
-MIN_GENERATIONS = 10         # Lower limit when behind schedule
-MAX_TOKENS_CODE = 16384      # Max tokens for code-based generations
-MAX_TOKENS_SHORT = 8192      # Max tokens for pure reasoning (saves budget for more gens)
+NUM_GENERATIONS = 8          # Base solutions per problem (adjusted dynamically)
+MAX_GENERATIONS = 12         # Upper limit when ahead of schedule
+MIN_GENERATIONS = 2          # Lower limit when behind schedule
+MAX_TOKENS_CODE = 8192       # Max tokens for code-based generations
+MAX_TOKENS_SHORT = 4096      # Max tokens for pure reasoning (saves budget for more gens)
 TOTAL_TIME_BUDGET = 17700    # 4h55m in seconds (5min safety margin)
 SETUP_TIME = 300             # Model loading time
 CODE_EXEC_TIMEOUT = 30       # Timeout for SymPy verification
@@ -785,8 +785,8 @@ class AIMOSolver:
         When ahead of schedule → generate more (up to MAX_GENERATIONS)
         When behind schedule → generate fewer (down to MIN_GENERATIONS)
         """
-        # Average ~18s per generation on H100 for 8K tokens
-        est_time_per_gen = 18
+        # Average ~35s per generation on H100 for 4K tokens (measured empirically)
+        est_time_per_gen = 35
         # Reserve time for retry (30s) + verification (20s) + buffer (20s)
         available = time_budget - 70
         max_by_time = max(MIN_GENERATIONS, int(available / est_time_per_gen))
@@ -798,7 +798,7 @@ class AIMOSolver:
         remaining_problems = self.total_problems - self.problems_solved + 1
         elapsed_global = time.time() - GLOBAL_START
         remaining_global = max(0, TOTAL_TIME_BUDGET - elapsed_global)
-        time_budget = min(remaining_global / remaining_problems, 340)
+        time_budget = remaining_global / remaining_problems
         
         # Classify problem for template routing
         prob_type = classify_problem(problem)
@@ -837,7 +837,7 @@ class AIMOSolver:
 
         # Phase 2: First batch — diverse exploration (temp=0.6)
         num_diverse = effective_gens - 1
-        batch1_size = min(8, num_diverse)
+        batch1_size = min(4, num_diverse)
         if batch1_size > 0 and time.time() - start < time_budget - 20:
             prompts = []
             for i in range(batch1_size):
@@ -853,77 +853,67 @@ class AIMOSolver:
                 all_answers.append(extract_answer(t))
                 code_answers.append(verify_with_code(t))
 
-        # Phase 2b: Second batch — adaptive temperature
-        batch2_size = num_diverse - batch1_size
-        if batch2_size > 0 and time.time() - start < time_budget - 20:
-            # Check consensus from first batch to pick temperature
-            _, early_conf = weighted_vote(all_answers, code_answers)
-            if early_conf >= 0.6 and self.sp_refine_factory:
-                sp_batch2 = self.sp_refine_factory(prob_seed + 50)
-                logger.info(f"  Batch2: REFINE mode (conf={early_conf:.2f}, temp=0.3)")
-            elif early_conf < 0.3 and self.sp_explore_factory:
-                sp_batch2 = self.sp_explore_factory(prob_seed + 50)
-                logger.info(f"  Batch2: EXPLORE mode (conf={early_conf:.2f}, temp=0.9)")
-            else:
-                sp_batch2 = self.sp_div_factory(prob_seed + 50)
-                logger.info(f"  Batch2: STANDARD mode (conf={early_conf:.2f}, temp=0.6)")
-            
-            prompts = []
-            for i in range(batch2_size):
-                tmpl = templates[(batch1_size + i) % len(templates)]
-                fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
-                if '{few_shot}' in tmpl:
-                    fmt_kwargs['few_shot'] = few_shot
-                prompts.append(tmpl.format(**fmt_kwargs))
-            
-            texts = self._gen(prompts, sp_batch2)
-            for t in texts:
-                all_answers.append(extract_answer(t))
-                code_answers.append(verify_with_code(t))
+        # Early exit: if deterministic + batch1 have high consensus, skip further work
+        _, early_conf = weighted_vote(all_answers, code_answers)
+        if early_conf >= 0.7:
+            logger.info(f"  Early exit after batch1: conf={early_conf:.2f}")
+        else:
+            # Phase 2b: Second batch — adaptive temperature
+            batch2_size = num_diverse - batch1_size
+            if batch2_size > 0 and time.time() - start < time_budget - 20:
+                # Check consensus from first batch to pick temperature
+                _, b2_conf = weighted_vote(all_answers, code_answers)
+                if b2_conf >= 0.6 and self.sp_refine_factory:
+                    sp_batch2 = self.sp_refine_factory(prob_seed + 50)
+                    logger.info(f"  Batch2: REFINE mode (conf={b2_conf:.2f}, temp=0.3)")
+                elif b2_conf < 0.3 and self.sp_explore_factory:
+                    sp_batch2 = self.sp_explore_factory(prob_seed + 50)
+                    logger.info(f"  Batch2: EXPLORE mode (conf={b2_conf:.2f}, temp=0.9)")
+                else:
+                    sp_batch2 = self.sp_div_factory(prob_seed + 50)
+                    logger.info(f"  Batch2: STANDARD mode (conf={b2_conf:.2f}, temp=0.6)")
+                
+                prompts = []
+                for i in range(batch2_size):
+                    tmpl = templates[(batch1_size + i) % len(templates)]
+                    fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
+                    if '{few_shot}' in tmpl:
+                        fmt_kwargs['few_shot'] = few_shot
+                    prompts.append(tmpl.format(**fmt_kwargs))
+                
+                texts = self._gen(prompts, sp_batch2)
+                for t in texts:
+                    all_answers.append(extract_answer(t))
+                    code_answers.append(verify_with_code(t))
 
-        # Phase 3: Aggressive retry on low confidence (up to 3 rounds)
-        # Each round uses a DIFFERENT template to maximize diversity
-        retry_templates = [COMPUTE_TEMPLATE, THEORY_TEMPLATE, CODE_TEMPLATE]
-        best, conf = weighted_vote(all_answers, code_answers)
-        retry_round = 0
-        while conf < 0.4 and retry_round < 3 and time.time() - start < time_budget - 30:
-            valid = [a for a in all_answers if a is not None]
-            candidate_info = ""
-            if valid:
-                dist = Counter(valid).most_common(3)
-                candidate_info = ", ".join(f"{v} ({c} votes)" for v, c in dist)
-            
-            # Alternate between RETRY_TEMPLATE (with context) and fresh templates
-            if retry_round == 0 or candidate_info:
+            # Phase 3: Retry on low confidence (1 round max to save time)
+            best, conf = weighted_vote(all_answers, code_answers)
+            if conf < 0.4 and time.time() - start < time_budget - 30:
+                valid = [a for a in all_answers if a is not None]
+                candidate_info = ""
+                if valid:
+                    dist = Counter(valid).most_common(3)
+                    candidate_info = ", ".join(f"{v} ({c} votes)" for v, c in dist)
+                
                 prompt = RETRY_TEMPLATE.format(
                     system=SYSTEM_PROMPT, problem=problem,
                     previous_answer=candidate_info if candidate_info else "unknown",
                     few_shot=few_shot
                 )
-            else:
-                # Fresh template — no bias from previous answers
-                rtmpl = retry_templates[retry_round % len(retry_templates)]
-                fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
-                if '{few_shot}' in rtmpl:
-                    fmt_kwargs['few_shot'] = few_shot
-                prompt = rtmpl.format(**fmt_kwargs)
-            
-            sp_retry = self.sp_div_factory(prob_seed + 100 + retry_round)
-            texts = self._gen([prompt], sp_retry)
-            for t in texts:
-                all_answers.append(extract_answer(t))
-                code_answers.append(verify_with_code(t))
-            
-            best, conf = weighted_vote(all_answers, code_answers)
-            retry_round += 1
-            logger.info(f"  Retry {retry_round}: best={best}, conf={conf:.2f}")
+                sp_retry = self.sp_div_factory(prob_seed + 100)
+                texts = self._gen([prompt], sp_retry)
+                for t in texts:
+                    all_answers.append(extract_answer(t))
+                    code_answers.append(verify_with_code(t))
+                best, conf = weighted_vote(all_answers, code_answers)
+                logger.info(f"  Retry: best={best}, conf={conf:.2f}")
 
-        # Phase 4: Verification — ask model to confirm best answer
+        # Phase 4: Verification — only when plenty of time and low confidence
         best_candidate = select_answer(all_answers, code_answers)
         _, pre_verify_conf = weighted_vote(all_answers, code_answers)
-        if (pre_verify_conf < 0.8
+        if (pre_verify_conf < 0.5
             and best_candidate != 0
-            and time.time() - start < time_budget - 40):
+            and time.time() - start < time_budget * 0.6):
             verify_prompt = VERIFY_TEMPLATE.format(
                 system=SYSTEM_PROMPT, problem=problem,
                 candidate_answer=best_candidate
