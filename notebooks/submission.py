@@ -74,12 +74,15 @@ VLLM_CONFIG = {
 }
 
 # Inference settings
-NUM_GENERATIONS = 16         # Solutions per problem (more samples = better consensus)
+NUM_GENERATIONS = 16         # Base solutions per problem (adjusted dynamically)
+MAX_GENERATIONS = 24         # Upper limit when ahead of schedule
+MIN_GENERATIONS = 10         # Lower limit when behind schedule
 MAX_TOKENS_CODE = 16384      # Max tokens for code-based generations
 MAX_TOKENS_SHORT = 8192      # Max tokens for pure reasoning (saves budget for more gens)
 TOTAL_TIME_BUDGET = 17700    # 4h55m in seconds (5min safety margin)
 SETUP_TIME = 300             # Model loading time
 CODE_EXEC_TIMEOUT = 30       # Timeout for SymPy verification
+CODE_EXEC_TIMEOUT_HEAVY = 45 # Extended timeout for computationally intensive code
 
 # ─── System Prompt ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an expert mathematician solving competition-level olympiad problems.
@@ -294,25 +297,97 @@ def get_template_order(problem_type: str) -> list:
         return [CODE_TEMPLATE, SOLVE_TEMPLATE, THEORY_TEMPLATE, COMPUTE_TEMPLATE, CODE_TEMPLATE]
 
 
+def detect_modulus(problem: str) -> Optional[int]:
+    """Detect the modulus if the problem asks for a remainder.
+    
+    Patterns: 'remainder when ... divided by N', 'mod N', 'modulo N', '(mod N)'
+    """
+    text = problem.replace(',', '')
+    # Pattern: remainder when divided by N
+    m = re.search(r'remainder\s+when.*?divided\s+by\s+(\d+)', text, re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    # Pattern: mod 10^5, mod 10^{5}, modulo 10^5
+    m = re.search(r'(?:mod(?:ulo)?|\\pmod)\s*\{?\s*(\d+)\s*\^\s*\{?(\d+)\}?\}?', text)
+    if m:
+        try:
+            return int(m.group(1)) ** int(m.group(2))
+        except (ValueError, OverflowError):
+            pass
+    # Pattern: mod N, modulo N, (mod N)
+    m = re.search(r'(?:mod(?:ulo)?|\\pmod)\s*\{?\s*(\d+)\s*\}?', text)
+    if m:
+        try:
+            v = int(m.group(1))
+            if v > 1:
+                return v
+        except ValueError:
+            pass
+    return None
+
+
+def validate_answer_with_modulus(answer: int, modulus: Optional[int]) -> int:
+    """If a modulus was detected and answer >= modulus, reduce mod modulus."""
+    if answer is None:
+        return 0
+    if modulus is not None and modulus > 1 and answer >= modulus:
+        return answer % modulus
+    return answer
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANSWER EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _try_eval_boxed_expr(expr: str) -> Optional[int]:
+    """Try to evaluate a LaTeX math expression inside \\boxed{} to an integer.
+    
+    Handles: 2^{10}, 3 \\cdot 5, 100-4, etc.
+    """
+    # Clean LaTeX
+    s = expr.strip()
+    s = re.sub(r'\\cdot', '*', s)
+    s = re.sub(r'\\times', '*', s)
+    s = re.sub(r'\\div', '//', s)
+    s = re.sub(r'\\(?:pmod|mod)\s*\{?[^}]*\}?', '', s)  # strip trailing pmod{...}
+    s = re.sub(r'[{}]', '', s)  # remove remaining braces
+    s = s.replace('^', '**')   # exponentiation
+    s = s.strip()
+    if not s:
+        return None
+    # Safety: only allow digits, operators, spaces, parens
+    if not re.match(r'^[\d+\-*/()\s.]+$', s):
+        return None
+    try:
+        v = int(eval(s))  # safe: regex-validated to only contain arithmetic
+        if 0 <= v <= 99999:
+            return v
+    except Exception:
+        pass
+    return None
+
 
 def _extract_answer_from_segment(text: str) -> Optional[int]:
     """Extract integer answer from a text segment."""
     if not text:
         return None
-    # \\boxed{...}
-    for pattern in [r'\\boxed\{(\s*\d+\s*)\}', r'\\boxed\{\s*(\d[\d,\s]*)\s*\}']:
-        matches = re.findall(pattern, text)
-        if matches:
-            raw = matches[-1].strip().replace(',', '').replace(' ', '')
-            try:
-                v = int(raw)
-                if 0 <= v <= 99999:
-                    return v
-            except ValueError:
-                pass
+    # \\boxed{...} — try plain integer first
+    boxed_matches = re.findall(r'\\boxed\{([^}]+)\}', text)
+    if boxed_matches:
+        raw = boxed_matches[-1].strip().replace(',', '').replace(' ', '')
+        try:
+            v = int(raw)
+            if 0 <= v <= 99999:
+                return v
+        except ValueError:
+            pass
+        # Try evaluating as math expression (e.g., 2^{10}, 3*5)
+        v = _try_eval_boxed_expr(boxed_matches[-1])
+        if v is not None:
+            return v
     # "answer is X"
     for pattern in [r'(?:final\s+)?answer\s+is\s*[:\s]*(\d+)', r'answer\s*[:=]\s*(\d+)']:
         matches = re.findall(pattern, text, re.IGNORECASE)
@@ -407,7 +482,11 @@ def execute_code(code: str, timeout: int = CODE_EXEC_TIMEOUT) -> tuple[bool, str
 
 
 def _parse_answer_from_output(output: str) -> Optional[int]:
-    """Parse an integer answer from code execution output."""
+    """Parse an integer answer from code execution output.
+    
+    Handles: bare integers, floats, 'answer is X', 'result: X',
+    sympy Integer/Rational output, negative numbers (treated as invalid).
+    """
     lines = output.strip().split('\n')
     # Pass 1: look for explicit answer patterns in any line (last match wins)
     for line in reversed(lines):
@@ -425,6 +504,8 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
     # Pass 2: last line with a number (handles bare print(42) or print(42.0))
     for line in reversed(lines):
         stripped = line.strip()
+        # Handle sympy Integer/Rational (e.g., "Integer(336)", prints as "336")
+        # Also handle "mod(...)" output patterns
         # Try the whole line as a number first (most common: just "336")
         try:
             v = int(float(stripped))
@@ -432,6 +513,15 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
                 return v
         except (ValueError, OverflowError):
             pass
+        # Handle fraction output like "336/1" from sympy Rational
+        frac_m = re.match(r'^(\d+)/1$', stripped)
+        if frac_m:
+            try:
+                v = int(frac_m.group(1))
+                if 0 <= v <= 99999:
+                    return v
+            except ValueError:
+                pass
         # Fall back to extracting last integer token
         m = re.search(r'(\d+)', stripped)
         if m:
@@ -617,6 +707,19 @@ class AIMOSolver:
         import hashlib
         return int(hashlib.sha256(problem.encode()).hexdigest()[:8], 16) % (2**31)
 
+    def _dynamic_gen_count(self, time_budget: float) -> int:
+        """Adjust generation count based on available time budget.
+        
+        When ahead of schedule → generate more (up to MAX_GENERATIONS)
+        When behind schedule → generate fewer (down to MIN_GENERATIONS)
+        """
+        # Average ~18s per generation on H100 for 8K tokens
+        est_time_per_gen = 18
+        # Reserve time for retry (30s) + verification (20s) + buffer (20s)
+        available = time_budget - 70
+        max_by_time = max(MIN_GENERATIONS, int(available / est_time_per_gen))
+        return min(max_by_time, MAX_GENERATIONS)
+
     def solve(self, problem: str) -> int:
         start = time.time()
         self.problems_solved += 1
@@ -629,9 +732,16 @@ class AIMOSolver:
         prob_type = classify_problem(problem)
         templates = get_template_order(prob_type)
         
+        # Detect modulus for answer validation
+        modulus = detect_modulus(problem)
+        
+        # Dynamic generation count based on time budget
+        effective_gens = self._dynamic_gen_count(time_budget)
+        
         logger.info(
             f"[{self.problems_solved}/{self.total_problems}] "
-            f"Type: {prob_type} | Budget: {time_budget:.0f}s | Global remaining: {remaining_global:.0f}s"
+            f"Type: {prob_type} | Gens: {effective_gens} | "
+            f"Mod: {modulus} | Budget: {time_budget:.0f}s | Global remaining: {remaining_global:.0f}s"
         )
 
         all_answers = []
@@ -648,7 +758,7 @@ class AIMOSolver:
                 code_answers.append(verify_with_code(t))
 
         # Phase 2: First batch — diverse exploration (temp=0.6)
-        num_diverse = self.num_gens - 1
+        num_diverse = effective_gens - 1
         batch1_size = min(8, num_diverse)
         if batch1_size > 0 and time.time() - start < time_budget - 20:
             prompts = []
@@ -694,6 +804,8 @@ class AIMOSolver:
                 code_answers.append(verify_with_code(t))
 
         # Phase 3: Aggressive retry on low confidence (up to 3 rounds)
+        # Each round uses a DIFFERENT template to maximize diversity
+        retry_templates = [COMPUTE_TEMPLATE, THEORY_TEMPLATE, CODE_TEMPLATE]
         best, conf = weighted_vote(all_answers, code_answers)
         retry_round = 0
         while conf < 0.4 and retry_round < 3 and time.time() - start < time_budget - 30:
@@ -703,11 +815,21 @@ class AIMOSolver:
                 dist = Counter(valid).most_common(3)
                 candidate_info = ", ".join(f"{v} ({c} votes)" for v, c in dist)
             
-            prompt = RETRY_TEMPLATE.format(
-                system=SYSTEM_PROMPT, problem=problem,
-                previous_answer=candidate_info if candidate_info else "unknown",
-                few_shot=FEW_SHOT_EXAMPLES
-            )
+            # Alternate between RETRY_TEMPLATE (with context) and fresh templates
+            if retry_round == 0 or candidate_info:
+                prompt = RETRY_TEMPLATE.format(
+                    system=SYSTEM_PROMPT, problem=problem,
+                    previous_answer=candidate_info if candidate_info else "unknown",
+                    few_shot=FEW_SHOT_EXAMPLES
+                )
+            else:
+                # Fresh template — no bias from previous answers
+                rtmpl = retry_templates[retry_round % len(retry_templates)]
+                fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
+                if '{few_shot}' in rtmpl:
+                    fmt_kwargs['few_shot'] = FEW_SHOT_EXAMPLES
+                prompt = rtmpl.format(**fmt_kwargs)
+            
             sp_retry = self.sp_div_factory(prob_seed + 100 + retry_round)
             texts = self._gen([prompt], sp_retry)
             for t in texts:
@@ -738,7 +860,12 @@ class AIMOSolver:
                     code_answers.append(v_code)
             logger.info(f"  Verification: pre_conf={pre_verify_conf:.2f}")
 
-        final = select_answer(all_answers, code_answers)
+        raw_final = select_answer(all_answers, code_answers)
+        # Validate against detected modulus
+        final = validate_answer_with_modulus(raw_final, modulus)
+        if final != raw_final:
+            logger.info(f"  Modulus correction: {raw_final} → {final} (mod {modulus})")
+        
         elapsed = time.time() - start
         _, final_conf = weighted_vote(all_answers, code_answers)
         logger.info(
@@ -834,7 +961,13 @@ def main():
 
     # ─── Warmup ───────────────────────────────────────────────────────────
     logger.info("Warming up model...")
-    _ = llm.generate(["What is 2+2?"], SamplingParams(max_tokens=32, temperature=0))
+    warmup_prompt = (
+        "Find the remainder when 7^100 is divided by 13.\n"
+        "By Fermat's little theorem, 7^12 ≡ 1 (mod 13).\n"
+        "100 = 12*8 + 4, so 7^100 ≡ 7^4 = 2401 ≡ 2401 mod 13 = 9.\n"
+        "The answer is \\boxed{9}."
+    )
+    _ = llm.generate([warmup_prompt], SamplingParams(max_tokens=32, temperature=0))
     logger.info(f"Setup completed in {time.time() - GLOBAL_START:.1f}s")
 
     def make_sp_explore(seed):

@@ -566,6 +566,228 @@ def test_multi_block_execution():
     
     print(f"Multi-block execution: {passed}/2 tests passed")
     return passed == 2
+
+
+def test_modulus_detection():
+    """Test modulus detection from problem text."""
+    import re
+    
+    def detect_modulus(problem):
+        text = problem.replace(',', '')
+        m = re.search(r'remainder\s+when.*?divided\s+by\s+(\d+)', text, re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
+        m = re.search(r'(?:mod(?:ulo)?|\\pmod)\s*\{?\s*(\d+)\s*\^\s*\{?(\d+)\}?\}?', text)
+        if m:
+            try:
+                return int(m.group(1)) ** int(m.group(2))
+            except (ValueError, OverflowError):
+                pass
+        m = re.search(r'(?:mod(?:ulo)?|\\pmod)\s*\{?\s*(\d+)\s*\}?', text)
+        if m:
+            try:
+                v = int(m.group(1))
+                if v > 1:
+                    return v
+            except ValueError:
+                pass
+        return None
+    
+    test_cases = [
+        ("Find the remainder when 100! is divided by 97.", 97),
+        ("Find x mod 1000.", 1000),
+        ("Compute the answer modulo 10^5.", 100000),
+        ("Find \\pmod{99991}.", 99991),
+        ("What is the area of the triangle?", None),
+        ("Find the remainder when divided by 7.", 7),
+    ]
+    
+    passed = 0
+    for problem, expected in test_cases:
+        result = detect_modulus(problem)
+        if result == expected:
+            passed += 1
+        else:
+            print(f"  FAIL: detect_modulus({problem[:50]!r}) = {result}, expected {expected}")
+    
+    print(f"Modulus detection: {passed}/{len(test_cases)} tests passed")
+    return passed == len(test_cases)
+
+
+def test_modulus_validation():
+    """Test answer validation with modulus."""
+
+    def validate_answer_with_modulus(answer, modulus):
+        if answer is None:
+            return 0
+        if modulus is not None and modulus > 1 and answer >= modulus:
+            return answer % modulus
+        return answer
+    
+    test_cases = [
+        (336, None, 336),          # No modulus, unchanged
+        (336, 100000, 336),        # Answer < modulus, unchanged
+        (100001, 100000, 1),       # Answer > modulus, reduce
+        (99999, 97, 99999 % 97),   # Reduce mod 97
+        (0, 1000, 0),             # Zero unchanged
+    ]
+    
+    passed = 0
+    for answer, modulus, expected in test_cases:
+        result = validate_answer_with_modulus(answer, modulus)
+        if result == expected:
+            passed += 1
+        else:
+            print(f"  FAIL: validate({answer}, mod={modulus}) = {result}, expected {expected}")
+    
+    print(f"Modulus validation: {passed}/{len(test_cases)} tests passed")
+    return passed == len(test_cases)
+
+
+def test_boxed_expression():
+    """Test parsing of \\boxed{expression} with math operators."""
+    import re
+    
+    def _try_eval_boxed_expr(expr):
+        s = expr.strip()
+        s = re.sub(r'\\cdot', '*', s)
+        s = re.sub(r'\\times', '*', s)
+        s = re.sub(r'\\div', '//', s)
+        s = re.sub(r'\\(?:pmod|mod)\s*\{?[^}]*\}?', '', s)
+        s = re.sub(r'[{}]', '', s)
+        s = s.replace('^', '**')
+        s = s.strip()
+        if not s:
+            return None
+        if not re.match(r'^[\d+\-*/() \s.]+$', s):
+            return None
+        try:
+            v = int(eval(s))
+            if 0 <= v <= 99999:
+                return v
+        except Exception:
+            pass
+        return None
+    
+    test_cases = [
+        ("2^{10}", 1024),
+        ("3 \\cdot 5", 15),
+        ("100 - 4", 96),
+        ("2 \\times 3 \\times 7", 42),
+        ("336 \\pmod{10^5}", 336),  # pmod stripped, just 336
+        ("abc", None),  # not valid arithmetic
+        ("2^{17}", None),  # 131072 > 99999
+    ]
+    
+    passed = 0
+    for expr, expected in test_cases:
+        result = _try_eval_boxed_expr(expr)
+        if result == expected:
+            passed += 1
+        else:
+            print(f"  FAIL: eval_boxed({expr!r}) = {result}, expected {expected}")
+    
+    print(f"Boxed expression: {passed}/{len(test_cases)} tests passed")
+    return passed == len(test_cases)
+
+
+def test_dynamic_gen_count():
+    """Test dynamic generation count logic."""
+    MIN_GENERATIONS = 10
+    MAX_GENERATIONS = 24
+    
+    def dynamic_gen_count(time_budget):
+        est_time_per_gen = 18
+        available = time_budget - 70
+        max_by_time = max(MIN_GENERATIONS, int(available / est_time_per_gen))
+        return min(max_by_time, MAX_GENERATIONS)
+    
+    test_cases = [
+        (340, 15),   # Standard budget: (340-70)/18 = 15
+        (500, 23),   # Generous budget: (500-70)/18 = 23
+        (600, 24),   # Over max: capped at 24
+        (100, 10),   # Tight budget: min 10
+    ]
+    
+    passed = 0
+    for budget, expected in test_cases:
+        result = dynamic_gen_count(budget)
+        if result == expected:
+            passed += 1
+        else:
+            print(f"  FAIL: dynamic_gen({budget}) = {result}, expected {expected}")
+    
+    print(f"Dynamic gen count: {passed}/{len(test_cases)} tests passed")
+    return passed == len(test_cases)
+
+
+def test_sympy_output_parsing():
+    """Test parsing sympy-style output from code execution."""
+    import re
+    
+    def _parse_answer_from_output(output):
+        lines = output.strip().split('\n')
+        for line in reversed(lines):
+            stripped = line.strip()
+            for pat in [r'(?:final\s+)?answer\s*(?:is|=|:)\s*([\d.]+)',
+                        r'result\s*(?:is|=|:)\s*([\d.]+)']:
+                m = re.search(pat, stripped, re.IGNORECASE)
+                if m:
+                    try:
+                        v = int(float(m.group(1)))
+                        if 0 <= v <= 99999:
+                            return v
+                    except (ValueError, OverflowError):
+                        pass
+        for line in reversed(lines):
+            stripped = line.strip()
+            try:
+                v = int(float(stripped))
+                if 0 <= v <= 99999:
+                    return v
+            except (ValueError, OverflowError):
+                pass
+            frac_m = re.match(r'^(\d+)/1$', stripped)
+            if frac_m:
+                try:
+                    v = int(frac_m.group(1))
+                    if 0 <= v <= 99999:
+                        return v
+                except ValueError:
+                    pass
+            m = re.search(r'(\d+)', stripped)
+            if m:
+                try:
+                    v = int(m.group(1))
+                    if 0 <= v <= 99999:
+                        return v
+                except ValueError:
+                    pass
+        return None
+    
+    test_cases = [
+        ("336/1\n", 336),      # sympy Rational
+        ("42\n", 42),           # plain int
+        ("336.0\n", 336),       # float
+        ("answer = 520\n", 520), # explicit pattern
+    ]
+    
+    passed = 0
+    for output, expected in test_cases:
+        result = _parse_answer_from_output(output)
+        if result == expected:
+            passed += 1
+        else:
+            print(f"  FAIL: parse({output!r}) = {result}, expected {expected}")
+    
+    print(f"Sympy output parsing: {passed}/{len(test_cases)} tests passed")
+    return passed == len(test_cases)
+
+
+def eval_with_model(model_path=None, max_problems=None):
     """Run full evaluation with vLLM model against reference problems."""
     try:
         from vllm import LLM, SamplingParams
@@ -655,6 +877,11 @@ def main():
         test_code_repair()
         test_verify_template()
         test_multi_block_execution()
+        test_modulus_detection()
+        test_modulus_validation()
+        test_boxed_expression()
+        test_dynamic_gen_count()
+        test_sympy_output_parsing()
         print("\nTo run full model evaluation: python evaluation/local_eval.py --with-model")
 
 
