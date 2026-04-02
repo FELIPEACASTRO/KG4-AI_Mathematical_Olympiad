@@ -26,10 +26,7 @@ from pathlib import Path
 from collections import Counter
 from typing import Optional
 
-try:
-    import polars as pl
-except ImportError:
-    pl = None
+import polars as pl
 
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -1094,37 +1091,23 @@ def main():
     solver = AIMOSolver(llm, sp_det, make_sp_div, make_sp_explore, make_sp_refine)
 
     # ─── Prediction Function ──────────────────────────────────────────────
-    def predict(*args):
+    def predict(id_: pl.Series, problem: pl.Series) -> pl.DataFrame:
         """Called by the Kaggle evaluation API for each problem.
         
-        The gateway calls predict(*data_batch) where data_batch is a polars
-        DataFrame with columns ['id', 'problem']. Polars DataFrame unpacking
-        yields Series objects, so we receive (id_series, problem_series).
+        The gateway calls predict(id_series, problem_series) where each is a
+        polars Series. Must return a pl.DataFrame with 'id' and 'answer' columns.
         """
         try:
-            # Extract id and problem from polars Series args
-            if len(args) == 2:
-                id_col, prob_col = args
-                if pl is not None and isinstance(id_col, pl.Series):
-                    id_ = str(id_col[0])
-                    problem = str(prob_col[0])
-                else:
-                    id_ = str(id_col)
-                    problem = str(prob_col)
-            elif len(args) == 1 and pl is not None and isinstance(args[0], pl.DataFrame):
-                id_ = str(args[0]['id'][0])
-                problem = str(args[0]['problem'][0])
-            else:
-                id_ = 'unknown'
-                problem = str(args[0]) if args else ''
+            id_val = id_.item(0)
+            problem_text = str(problem.item(0))
 
-            logger.info(f"Problem {id_}: {problem[:100]}...")
-            answer = solver.solve(problem)
-            logger.info(f"Problem {id_}: answer = {answer}")
-            return answer
+            logger.info(f"Problem {id_val}: {problem_text[:100]}...")
+            answer = solver.solve(problem_text)
+            logger.info(f"Problem {id_val}: answer = {answer}")
+            return pl.DataFrame({'id': id_val, 'answer': int(answer)})
         except Exception as e:
             logger.error(f"Problem failed: {e}")
-            return 0
+            return pl.DataFrame({'id': id_.item(0), 'answer': 0})
 
     # ─── Start Kaggle Inference Server ────────────────────────────────────
     import kaggle_evaluation.aimo_3_inference_server
