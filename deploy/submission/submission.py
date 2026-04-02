@@ -1,5 +1,5 @@
 """
-AIMO3 Competition Submission Notebook ? Notebook 2/2
+AIMO3 Competition Submission Notebook - Notebook 2/2
 ====================================================
 This is the main inference notebook for the AI Mathematical Olympiad Progress Prize 3.
 
@@ -28,7 +28,7 @@ from typing import Optional
 
 import polars as pl
 
-# ??? Logging Setup ????????????????????????????????????????????????????????????
+# === Logging Setup ============================================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -39,7 +39,7 @@ logger = logging.getLogger('aimo3')
 GLOBAL_START = time.time()
 logger.info("AIMO3 Submission starting...")
 
-# ??? Install dependencies from utility notebook ??????????????????????????????
+# === Install dependencies from utility notebook ==============================
 # On Kaggle, the utility notebook output contains pre-built wheels
 UTILITY_DIR = "/kaggle/input/aimo3-utility-notebook-dependency-install-1-2"
 if os.path.exists(UTILITY_DIR):
@@ -61,8 +61,8 @@ else:
     logger.warning(f"Utility dir not found: {UTILITY_DIR}, trying direct pip install")
     os.system("pip install vllm")
 
-# ??? Configuration ????????????????????????????????????????????????????????????
-# Model path ? adjust based on how the model is attached on Kaggle
+# === Configuration ============================================================
+# Model path - adjust based on how the model is attached on Kaggle
 MODEL_PATHS = [
     "/kaggle/input/models/deepseek-ai/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b/2",
     "/kaggle/input/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b/2",
@@ -87,52 +87,58 @@ VLLM_CONFIG = {
     "enable_chunked_prefill": True,
 }
 
-# Inference settings ? v11: speed-optimized for full 50-problem coverage
-NUM_GENERATIONS = 4          # 1 deterministic + 2 diverse + 1 retry budget
+# Inference settings - v12: fix truncation + proper formatting + diversity
+NUM_GENERATIONS = 4          # 4 diverse generations with different system prompts
 MAX_GENERATIONS = 6          # Upper limit when ahead of schedule
 MIN_GENERATIONS = 2          # Lower limit when behind schedule
-MAX_TOKENS = 4096            # Unified token limit for ALL generations
+MAX_TOKENS = 16384           # Allow DeepSeek-R1 to complete <think> + answer
 TOTAL_TIME_BUDGET = 17700    # 4h55m in seconds (5min safety margin)
 SETUP_TIME = 300             # Model loading time
 CODE_EXEC_TIMEOUT = 30       # Timeout for SymPy verification
 CODE_EXEC_TIMEOUT_HEAVY = 45 # Extended timeout for computationally intensive code
 
-# ??? System Prompt ????????????????????????????????????????????????????????????
-SYSTEM_PROMPT = """You are an expert mathematician solving competition-level olympiad problems.
+# === System Prompts ===========================================================
+# v12: Multiple diverse system prompts for cognitive diversity (from top-scoring solutions)
 
-Rules:
-1. Think step by step with rigorous mathematical reasoning.
-2. Consider multiple approaches before committing to one.
-3. Verify your answer by substitution or alternative methods when possible.
-4. The final answer is always a non-negative integer between 0 and 99999 inclusive.
-5. Any modular arithmetic required is explicitly stated in the problem.
-6. Present your final answer as \\boxed{ANSWER}
+SYSTEM_PROMPTS = [
+    # Prompt 0: Rigorous + code verification (our strongest approach)
+    "You are solving a national/international-level mathematics olympiad problem. "
+    "You must rigorously define all variables, explore multiple solution strategies before committing, "
+    "perform full case analysis where required, justify every nontrivial step, explicitly check boundary "
+    "cases and hidden assumptions, and verify the final result using at least one independent method. "
+    "Write Python code in ```python ... ``` blocks to verify your answer computationally. "
+    "Return only the final numerical answer inside \\boxed{}. The answer must be an integer in [0, 99999]. Never guess.",
 
-Important conventions:
-- $\\log$ without a base means natural logarithm.
-- $\\lfloor x \\rfloor$ is the floor function (greatest integer <= x).
-- $\\lceil x \\rceil$ is the ceiling function (smallest integer >= x).
-- $\\{x\\}$ for a single value means fractional part: $x - \\lfloor x \\rfloor$.
-- $\\mathbb{N}$ = positive integers (>0), $\\mathbb{Z}$ = all integers.
-- Taxonomy is Bourbakist: equilateral triangles are isosceles, squares are rectangles.
-- A trapezium has at least one pair of parallel opposite sides.
-- $\\binom{a}{b} = 0$ if $b > a$, and $\\binom{0}{0} = 1$.
+    # Prompt 1: Self-refutation approach
+    "Solve the problem with full rigor. After obtaining a candidate solution, actively attempt to refute "
+    "your own answer by searching for counterexamples, re-running the logic from a different viewpoint, "
+    "and stress-testing edge cases. Only after the answer survives refutation, return it in \\boxed{}. "
+    "The answer must be an integer in [0, 99999]. Never guess.",
 
-Mathematical strategy tips:
-- The modulus varies by problem (10^5, 5^7, 99991, etc.) ? read the problem carefully.
-- If the answer is naturally smaller than the modulus, return it directly without extra reduction.
-- For very large exponents (e.g. 3^{n!}): use Fermat-Euler theorem ? a^{phi(m)} ? 1 (mod m) when gcd(a,m)=1.
-- For p-adic valuations of a^n ? b^n: use the Lifting the Exponent Lemma (LTE).
-- For prime factorization of n!: use Legendre's formula ? v_p(n!) = sum floor(n/p^k).
-- For counting balanced parenthesizations or lattice paths: Catalan numbers C_n = (2n)! / (n!(n+1)!).
-- For polynomial divisibility involving x^n ? 1: factor via cyclotomic polynomials.
-- For combinatorial problems, consider generating functions, inclusion-exclusion, or recursion.
-- For number theory: Chinese Remainder Theorem, Fermat's little theorem, quadratic residues.
-- For geometry: Stewart's theorem, power of a point, radical axes, spiral similarities.
-- For sequences: look for Fibonacci-like structure, Binet's formula, golden ratio.
-- Always double-check: did the problem ask for the answer mod something? Make sure you applied it."""
+    # Prompt 2: IMO time-pressure approach
+    "Solve this problem as if under IMO-level time pressure: identify the key invariant, symmetry, or "
+    "extremal principle early, avoid brute force unless strictly justified, compress reasoning without "
+    "sacrificing correctness, and perform at least one final arithmetic verification pass. "
+    "Write verification code in ```python ... ``` blocks. "
+    "Return only the final integer answer in \\boxed{}, with 0 <= answer <= 99999. Never guess.",
 
-# Few-shot examples ? type-specific for better signal
+    # Prompt 3: Multiple approaches
+    "You must attempt at least two fundamentally different solution approaches (e.g., algebraic vs "
+    "geometric, combinatorial vs number-theoretic). Proceed with the more rigorous one and use the "
+    "other as a verification tool. Return only the verified final answer in \\boxed{}, where the "
+    "answer is an integer in [0, 99999]. Never guess.",
+
+    # Prompt 4: Restart on inconsistency
+    "Solve the problem rigorously. If at any point a step relies on an unproven assumption, a jump in "
+    "logic is detected, or the computation becomes inconsistent, you must restart the solution from "
+    "first principles. Return only the final verified integer answer inside \\boxed{}, with "
+    "0 <= answer <= 99999. Never guess.",
+]
+
+# Default system prompt (used as fallback)
+SYSTEM_PROMPT = SYSTEM_PROMPTS[0]
+
+# Few-shot examples - type-specific for better signal
 FEW_SHOT_EXAMPLES = """Here are two solved examples to illustrate the expected format:
 
 Example 1 (Geometry):
@@ -222,7 +228,7 @@ Phase 2 - Computational Verification:
 Write Python code to verify your answer. Wrap code in ```python ... ``` blocks.
 Guidelines for the code:
 - Use sympy for symbolic computation: factorint, totient, mod_inverse, divisor_sigma, cyclotomic_poly.
-- For large numbers, use Python's arbitrary precision integers ? do NOT use floating point.
+- For large numbers, use Python's arbitrary precision integers - do NOT use floating point.
 - For modular arithmetic, use pow(base, exp, mod) for modular exponentiation.
 - For p-adic valuations: sympy.multiplicity(p, n) or manual computation.
 - For prime factorization of n!: Legendre's formula sum(n // p**k for k in range(1, ...)).
@@ -285,7 +291,7 @@ Solve this problem using a COMPUTATIONAL approach:
 
 If computation confirms a value, present your final answer as \\boxed{{ANSWER}}."""
 
-# Verification template ? asks model to confirm or disprove a candidate answer
+# Verification template - asks model to confirm or disprove a candidate answer
 VERIFY_TEMPLATE = """{system}
 
 Problem:
@@ -301,9 +307,9 @@ Your task:
 5. Present your final answer as \\boxed{{ANSWER}} where ANSWER is a non-negative integer between 0 and 99999."""
 
 
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 # PROBLEM CLASSIFICATION
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 
 def classify_problem(problem: str) -> str:
     """Classify problem type by keywords. Returns best-guess category."""
@@ -401,9 +407,9 @@ def validate_answer_with_modulus(answer: int, modulus: Optional[int]) -> int:
     return answer
 
 
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 # ANSWER EXTRACTION
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 
 def _try_eval_boxed_expr(expr: str) -> Optional[int]:
     """Try to evaluate a LaTeX math expression inside \\boxed{} to an integer.
@@ -437,7 +443,7 @@ def _extract_answer_from_segment(text: str) -> Optional[int]:
     """Extract integer answer from a text segment."""
     if not text:
         return None
-    # \\boxed{...} ? handle one level of nested braces (e.g., \boxed{336 \text{...}})
+    # \\boxed{...} - handle one level of nested braces (e.g., \boxed{336 \text{...}})
     boxed_matches = re.findall(r'\\boxed\{((?:[^{}]|\{[^{}]*\})*)\}', text)
     if boxed_matches:
         raw = boxed_matches[-1].strip().replace(',', '').replace(' ', '')
@@ -509,9 +515,9 @@ def extract_code_blocks(text: str) -> list[str]:
     return [b.strip() for b in blocks if b.strip()]
 
 
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 # CODE EXECUTION (Simple thread-based sandbox)
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 
 def execute_code(code: str, timeout: int = CODE_EXEC_TIMEOUT_HEAVY) -> tuple[bool, str]:
     """Execute Python code in a subprocess with timeout for reliable isolation."""
@@ -608,7 +614,7 @@ def _parse_answer_from_output(output: str) -> Optional[int]:
 def _try_repair_code(code: str, error_msg: str) -> Optional[str]:
     """Attempt to repair common code errors."""
     repaired = code
-    # Missing imports ? detect NameError for common math modules
+    # Missing imports - detect NameError for common math modules
     import_fixes = {
         'sympy': 'import sympy\nfrom sympy import *',
         'numpy': 'import numpy as np',
@@ -635,7 +641,7 @@ def verify_with_code(llm_output: str) -> Optional[int]:
     """Extract and run code from LLM output, return computed answer.
     
     Strategy:
-    1. Try each code block individually (last first ? usually the final solution).
+    1. Try each code block individually (last first - usually the final solution).
     2. If individual blocks fail, try concatenating ALL blocks as one script
        (handles progressive code where later blocks depend on earlier ones).
     3. If a block fails with a fixable error, attempt auto-repair and retry.
@@ -673,9 +679,9 @@ def verify_with_code(llm_output: str) -> Optional[int]:
     return None
 
 
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 # VOTING
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 
 def majority_vote(answers: list[Optional[int]]) -> Optional[int]:
     """Simple majority vote over valid answers."""
@@ -712,18 +718,18 @@ def weighted_vote(text_answers: list[Optional[int]],
         
         if ta is not None and ca is not None:
             if ta == ca:
-                # Text and code agree ? highest confidence (4x)
+                # Text and code agree -> highest confidence (4x)
                 counter[ta] += 4
                 total_weight += 4
             else:
-                # Text and code disagree ? discard both (cross-validation)
+                # Text and code disagree -> discard both (cross-validation)
                 pass
         elif ca is not None:
-            # Code-only answer ? 3x weight
+            # Code-only answer -> 3x weight
             counter[ca] += 3
             total_weight += 3
         elif ta is not None:
-            # Text-only answer ? 1x weight
+            # Text-only answer -> 1x weight
             counter[ta] += 1
             total_weight += 1
     
@@ -755,20 +761,22 @@ def select_answer(text_answers: list[Optional[int]],
     return ans if ans is not None else 0
 
 
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 # SOLVER
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
 
 class AIMOSolver:
-    """Main solver: LLM generation + extraction + voting pipeline."""
+    """Main solver: LLM generation + extraction + voting pipeline.
+    
+    v12: Uses chat template for proper DeepSeek-R1 formatting, multiple
+    diverse system prompts, temperature=1.0 with min_p=0.02 for
+    diversity with quality floor, and MAX_TOKENS=16384 to avoid truncation.
+    """
 
-    def __init__(self, llm, sp_det, sp_div_factory, sp_explore_factory=None,
-                 sp_refine_factory=None, num_gens=NUM_GENERATIONS):
+    def __init__(self, llm, sp_factory, num_gens=NUM_GENERATIONS):
         self.llm = llm
-        self.sp_det = sp_det
-        self.sp_div_factory = sp_div_factory      # callable(seed) -> SamplingParams (temp=0.6)
-        self.sp_explore_factory = sp_explore_factory  # callable(seed) -> SamplingParams (temp=0.9)
-        self.sp_refine_factory = sp_refine_factory    # callable(seed) -> SamplingParams (temp=0.3)
+        self.tokenizer = llm.get_tokenizer()
+        self.sp_factory = sp_factory           # callable(seed) -> SamplingParams
         self.num_gens = num_gens
         self.problems_solved = 0
         self.total_problems = 50
@@ -778,11 +786,25 @@ class AIMOSolver:
         import hashlib
         return int(hashlib.sha256(problem.encode()).hexdigest()[:8], 16) % (2**31)
 
+    def _format_chat(self, system_prompt: str, user_message: str) -> list[int]:
+        """Format as chat messages using tokenizer's chat template.
+        
+        This ensures proper special token encoding for DeepSeek-R1's
+        <think> reasoning mode activation.
+        """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        return self.tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True
+        )
+
     def _dynamic_gen_count(self, time_budget: float) -> int:
         """Adjust generation count based on available time budget."""
-        # ~50s per generation on H100 for 4K tokens (empirical with <think> overhead)
-        est_time_per_gen = 50
-        # Reserve 30s buffer for retry + overhead
+        # ~100s per generation on H100 for 16K tokens (batched, empirical)
+        est_time_per_gen = 100
+        # Reserve 30s buffer for code exec + overhead
         available = time_budget - 30
         max_by_time = max(MIN_GENERATIONS, int(available / est_time_per_gen))
         return min(max_by_time, MAX_GENERATIONS)
@@ -797,7 +819,6 @@ class AIMOSolver:
         
         # Classify problem for template routing
         prob_type = classify_problem(problem)
-        templates = get_template_order(prob_type)
         
         # Detect modulus for answer validation
         modulus = detect_modulus(problem)
@@ -814,66 +835,73 @@ class AIMOSolver:
         all_answers = []
         code_answers = []
         prob_seed = self._problem_seed(problem)
-        few_shot = get_few_shot_examples(prob_type)
 
-        # Phase 1: Deterministic generation (temperature=0, CODE_TEMPLATE)
-        det_answer = None
+        # == Single batch: N diverse generations with different system prompts ==
+        # Each generation gets a different system prompt for cognitive diversity
+        # and a unique seed for reproducibility across competition runs
+        user_msg = (
+            f"{problem}\n\n"
+            "Solve this problem step by step with rigorous reasoning. "
+            "If helpful, write Python verification code in ```python ... ``` blocks. "
+            "Present your final answer as \\boxed{ANSWER} where ANSWER is a non-negative integer "
+            "between 0 and 99999."
+        )
+
+        num_gens = min(effective_gens, len(SYSTEM_PROMPTS))
+        
+        # Build token-based prompts with proper chat template
+        token_prompts = []
+        sampling_params_list = []
+        for i in range(num_gens):
+            sys_prompt = SYSTEM_PROMPTS[i % len(SYSTEM_PROMPTS)]
+            try:
+                token_ids = self._format_chat(sys_prompt, user_msg)
+                token_prompts.append({"prompt_token_ids": token_ids})
+            except Exception as e:
+                # Fallback to text prompt if chat template fails
+                logger.warning(f"Chat template failed: {e}, using text fallback")
+                text_prompt = f"{sys_prompt}\n\n{user_msg}"
+                token_prompts.append(text_prompt)
+            sampling_params_list.append(self.sp_factory(prob_seed + i))
+
         if time.time() - start < time_budget - 20:
-            fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
-            prompt = CODE_TEMPLATE.format(**fmt_kwargs)
-            texts = self._gen([prompt], self.sp_det)
+            texts = self._gen(token_prompts, sampling_params_list)
             for t in texts:
                 ta = extract_answer(t)
                 ca = verify_with_code(t)
                 all_answers.append(ta)
                 code_answers.append(ca)
-                if det_answer is None:
-                    det_answer = ca if ca is not None else ta
+                logger.info(f"  Gen: text={ta}, code={ca}")
 
-        # Early exit: if det gen has code+text agreement, accept immediately
-        if len(all_answers) == 1 and all_answers[0] is not None and code_answers[0] is not None:
-            if all_answers[0] == code_answers[0]:
-                logger.info(f"  Early exit: det code+text agree = {all_answers[0]}")
-                # Skip to final processing below
-                all_answers = all_answers  # no-op, just skip Phase 2+3
-            else:
-                # Disagreement ? need diversity
-                pass
-
-        # Phase 2: Diverse batch (temp=0.6) ? only if not already converged
-        _, early_conf = weighted_vote(all_answers, code_answers)
-        batch_size = min(2, effective_gens - 1)
-        if early_conf < 0.9 and batch_size > 0 and time.time() - start < time_budget - 20:
-            prompts = []
-            for i in range(batch_size):
-                tmpl = templates[i % len(templates)]
-                fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
-                if '{few_shot}' in tmpl:
-                    fmt_kwargs['few_shot'] = few_shot
-                prompts.append(tmpl.format(**fmt_kwargs))
-            
-            sp_div = self.sp_div_factory(prob_seed)
-            texts = self._gen(prompts, sp_div)
-            for t in texts:
-                all_answers.append(extract_answer(t))
-                code_answers.append(verify_with_code(t))
-
-        # Phase 3: Retry ? only on very low confidence and if time permits
+        # == Early exit check ==
         best, conf = weighted_vote(all_answers, code_answers)
-        if conf < 0.2 and time.time() - start < time_budget - 40:
+        
+        # == Retry: only on very low confidence and if time permits ==
+        if conf < 0.3 and time.time() - start < time_budget - 60:
             valid = [a for a in all_answers if a is not None]
             candidate_info = ""
             if valid:
                 dist = Counter(valid).most_common(3)
                 candidate_info = ", ".join(f"{v} ({c} votes)" for v, c in dist)
             
-            prompt = RETRY_TEMPLATE.format(
-                system=SYSTEM_PROMPT, problem=problem,
-                previous_answer=candidate_info if candidate_info else "unknown",
-                few_shot=few_shot
+            retry_user_msg = (
+                f"{problem}\n\n"
+                f"Previous attempts yielded: {candidate_info if candidate_info else 'no clear answer'}. "
+                "Re-examine this problem carefully using a completely different approach. "
+                "Write Python code in ```python ... ``` blocks to verify computationally. "
+                "Present your final answer as \\boxed{ANSWER} where ANSWER is a non-negative integer "
+                "between 0 and 99999."
             )
-            sp_retry = self.sp_div_factory(prob_seed + 100)
-            texts = self._gen([prompt], sp_retry)
+            # Use a system prompt not yet used
+            retry_sys = SYSTEM_PROMPTS[num_gens % len(SYSTEM_PROMPTS)]
+            try:
+                retry_ids = self._format_chat(retry_sys, retry_user_msg)
+                retry_prompt = [{"prompt_token_ids": retry_ids}]
+            except Exception:
+                retry_prompt = [f"{retry_sys}\n\n{retry_user_msg}"]
+            
+            retry_sp = self.sp_factory(prob_seed + 100)
+            texts = self._gen(retry_prompt, [retry_sp])
             for t in texts:
                 all_answers.append(extract_answer(t))
                 code_answers.append(verify_with_code(t))
@@ -886,14 +914,10 @@ class AIMOSolver:
             code_answers = [a % modulus if a is not None and a >= modulus else a for a in code_answers]
 
         raw_final = select_answer(all_answers, code_answers)
-        # Fallback to deterministic answer instead of returning 0
-        if raw_final == 0 and det_answer is not None and det_answer != 0:
-            raw_final = det_answer
-            logger.info(f"  Using deterministic fallback: {raw_final}")
         # Validate against detected modulus
         final = validate_answer_with_modulus(raw_final, modulus)
         if final != raw_final:
-            logger.info(f"  Modulus correction: {raw_final} ? {final} (mod {modulus})")
+            logger.info(f"  Modulus correction: {raw_final} -> {final} (mod {modulus})")
         # Final clamping to valid range
         final = max(0, min(99999, final)) if isinstance(final, int) else 0
         
@@ -906,7 +930,11 @@ class AIMOSolver:
         return final
 
     def _gen(self, prompts, sp):
-        """Generate from a list of prompts (batched for GPU efficiency)."""
+        """Generate from a list of prompts (batched for GPU efficiency).
+        
+        Accepts both text prompts and token-based prompts (dicts with 
+        'prompt_token_ids'). sp can be a single SamplingParams or a list.
+        """
         try:
             outputs = self.llm.generate(prompts, sp)
             return [c.text for o in outputs for c in o.outputs]
@@ -915,14 +943,14 @@ class AIMOSolver:
             return []
 
 
-# ???????????????????????????????????????????????????????????????????????????????
-# MAIN ? Kaggle Inference Server
-# ???????????????????????????????????????????????????????????????????????????????
+# ===============================================================================
+# MAIN - Kaggle Inference Server
+# ===============================================================================
 
 def main():
     """Initialize model and start the Kaggle inference server."""
     
-    # ??? Find Model Path ??????????????????????????????????????????????????
+    # === Find Model Path ==================================================
     model_path = None
     for path in MODEL_PATHS:
         if os.path.exists(path):
@@ -959,7 +987,7 @@ def main():
     
     logger.info(f"Using model: {model_path}")
 
-    # ??? Initialize vLLM ??????????????????????????????????????????????????
+    # === Initialize vLLM ==================================================
     from vllm import LLM, SamplingParams
 
     logger.info("Initializing vLLM engine...")
@@ -972,67 +1000,38 @@ def main():
     
     logger.info(f"Model loaded in {time.time() - t0:.1f}s")
 
-    # Sampling params
-    sp_det = SamplingParams(
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=MAX_TOKENS,
-        stop=["</s>", "<|endoftext|>", "<|im_end|>"],
-    )
-
-    def make_sp_div(seed):
-        """Create diverse SamplingParams with a deterministic seed.
+    # Sampling params - v12: temperature=1.0 + min_p=0.02 for diversity with quality floor
+    # All generations use the same base params with per-problem seeds for reproducibility
+    def make_sp(seed):
+        """Create SamplingParams with temperature=1.0 and min_p=0.02.
         
-        Using a per-problem seed ensures identical results across both
+        Using per-problem seed ensures identical results across both
         competition runs, maximizing consistency score.
-        Uses MAX_TOKENS_SHORT to allow more generations within budget.
+        min_p=0.02 filters low-probability tokens while allowing diversity.
         """
         return SamplingParams(
-            temperature=0.6,
-            top_p=0.95,
-            top_k=50,
+            temperature=1.0,
+            min_p=0.02,
             max_tokens=MAX_TOKENS,
             seed=seed,
             stop=["</s>", "<|endoftext|>", "<|im_end|>"],
         )
 
-    # ??? Warmup ???????????????????????????????????????????????????????????
+    # === Warmup ===========================================================
     logger.info("Warming up model...")
     warmup_prompt = (
         "Find the remainder when 7^100 is divided by 13.\n"
-        "By Fermat's little theorem, 7^12 ? 1 (mod 13).\n"
-        "100 = 12*8 + 4, so 7^100 ? 7^4 = 2401 ? 2401 mod 13 = 9.\n"
+        "By Fermat's little theorem, 7^12 = 1 (mod 13).\n"
+        "100 = 12*8 + 4, so 7^100 = 7^4 = 2401 = 2401 mod 13 = 9.\n"
         "The answer is \\boxed{9}."
     )
     _ = llm.generate([warmup_prompt], SamplingParams(max_tokens=32, temperature=0))
     logger.info(f"Setup completed in {time.time() - GLOBAL_START:.1f}s")
 
-    def make_sp_explore(seed):
-        """High-diversity SamplingParams (temp=0.9) for low-consensus problems."""
-        return SamplingParams(
-            temperature=0.9,
-            top_p=0.98,
-            top_k=80,
-            max_tokens=MAX_TOKENS,
-            seed=seed,
-            stop=["</s>", "<|endoftext|>", "<|im_end|>"],
-        )
+    # === Create Solver ====================================================
+    solver = AIMOSolver(llm, make_sp)
 
-    def make_sp_refine(seed):
-        """Low-diversity SamplingParams (temp=0.3) for high-consensus refinement."""
-        return SamplingParams(
-            temperature=0.3,
-            top_p=0.90,
-            top_k=30,
-            max_tokens=MAX_TOKENS,
-            seed=seed,
-            stop=["</s>", "<|endoftext|>", "<|im_end|>"],
-        )
-
-    # ??? Create Solver ????????????????????????????????????????????????????
-    solver = AIMOSolver(llm, sp_det, make_sp_div, make_sp_explore, make_sp_refine)
-
-    # ??? Prediction Function ??????????????????????????????????????????????
+    # === Prediction Function ==============================================
     def predict(id_: pl.Series, problem: pl.Series) -> pl.DataFrame:
         """Called by the Kaggle evaluation API for each problem.
         
@@ -1051,7 +1050,7 @@ def main():
             logger.error(f"Problem failed: {e}")
             return pl.DataFrame({'id': id_.item(0), 'answer': 0})
 
-    # ??? Start Kaggle Inference Server ????????????????????????????????????
+    # === Start Kaggle Inference Server ====================================
     import kaggle_evaluation.aimo_3_inference_server
     
     inference_server = kaggle_evaluation.aimo_3_inference_server.AIMO3InferenceServer(predict)
