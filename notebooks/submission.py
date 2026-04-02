@@ -47,12 +47,29 @@ logger.info("AIMO3 Submission starting...")
 UTILITY_DIR = "/kaggle/input/aimo3-utility-notebook-dependency-install-1-2"
 if os.path.exists(UTILITY_DIR):
     logger.info(f"Installing deps from utility notebook: {UTILITY_DIR}")
-    os.system(f"pip install --no-index --find-links {UTILITY_DIR} vllm 2>/dev/null")
+    # Wheels are in the wheels/ subdirectory
+    wheels_dir = os.path.join(UTILITY_DIR, "wheels")
+    if os.path.isdir(wheels_dir):
+        ret = os.system(f"pip install --no-index --find-links {wheels_dir} vllm")
+        if ret != 0:
+            logger.warning(f"Wheel install failed (code {ret}), trying direct pip install")
+            os.system("pip install vllm")
+    else:
+        # Fallback: wheels may be in root dir
+        ret = os.system(f"pip install --no-index --find-links {UTILITY_DIR} vllm")
+        if ret != 0:
+            logger.warning("Fallback wheel install failed, trying direct pip install")
+            os.system("pip install vllm")
+else:
+    logger.warning(f"Utility dir not found: {UTILITY_DIR}, trying direct pip install")
+    os.system("pip install vllm")
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 # Model path — adjust based on how the model is attached on Kaggle
 MODEL_PATHS = [
+    "/kaggle/input/models/deepseek-ai/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b/2",
     "/kaggle/input/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b/2",
+    "/kaggle/input/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b",
     "/kaggle/input/deepseek-r1-distill-qwen-32b/transformers/default/1",
     "/kaggle/input/deepseek-r1-distill-qwen-32b",
     "/kaggle/input/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
@@ -70,7 +87,6 @@ VLLM_CONFIG = {
     "enforce_eager": False,
     "disable_log_stats": True,
     "enable_prefix_caching": True,
-    "swap_space": 4,
     "enable_chunked_prefill": True,
 }
 
@@ -976,24 +992,30 @@ def main():
             break
     
     if model_path is None:
-        # Try to find any model directory
-        kaggle_input = Path("/kaggle/input")
-        if kaggle_input.exists():
-            for d in kaggle_input.iterdir():
-                if 'deepseek' in d.name.lower() or 'qwen' in d.name.lower():
-                    # Walk to find the deepest directory with model files
-                    for root, dirs, files in os.walk(d):
-                        if any(f.endswith(('.safetensors', '.bin', 'config.json')) for f in files):
-                            model_path = root
-                            break
-                    if model_path:
+        # Try to find any model directory under /kaggle/input and subdirs
+        search_roots = [Path("/kaggle/input"), Path("/kaggle/input/models")]
+        for kaggle_input in search_roots:
+            if not kaggle_input.exists():
+                continue
+            # Log full directory tree for debugging
+            logger.info(f"Scanning {kaggle_input}:")
+            for root, dirs, files in os.walk(kaggle_input):
+                depth = str(root).count('/') - str(kaggle_input).count('/')
+                if depth <= 4:
+                    logger.info(f"  {'  '*depth}{root}/ ({len(files)} files)")
+                    if any(f.endswith(('.safetensors', '.bin', 'config.json')) for f in files):
+                        model_path = root
+                        logger.info(f"  Found model files at: {root}")
                         break
+            if model_path:
+                break
         
         if model_path is None:
             logger.error("No model found! Available inputs:")
             if Path("/kaggle/input").exists():
-                for item in Path("/kaggle/input").iterdir():
-                    logger.error(f"  {item}")
+                for item in Path("/kaggle/input").rglob("*"):
+                    if item.is_file():
+                        logger.error(f"  {item}")
             raise FileNotFoundError("Model not found in any expected path")
     
     logger.info(f"Using model: {model_path}")

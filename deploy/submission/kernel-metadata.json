@@ -16,5 +16,6 @@
   ],
   "model_sources": [
     "deepseek-ai/deepseek-r1/transformers/deepseek-r1-distill-qwen-32b/2"
-  ]
+  ],
+  "machine_shape": "NvidiaH100"
 }
