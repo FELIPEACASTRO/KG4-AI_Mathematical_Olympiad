@@ -87,12 +87,11 @@ VLLM_CONFIG = {
     "enable_chunked_prefill": True,
 }
 
-# Inference settings
-NUM_GENERATIONS = 8          # Base solutions per problem (adjusted dynamically)
-MAX_GENERATIONS = 12         # Upper limit when ahead of schedule
+# Inference settings — v11: speed-optimized for full 50-problem coverage
+NUM_GENERATIONS = 4          # 1 deterministic + 2 diverse + 1 retry budget
+MAX_GENERATIONS = 6          # Upper limit when ahead of schedule
 MIN_GENERATIONS = 2          # Lower limit when behind schedule
-MAX_TOKENS_CODE = 8192       # Max tokens for code-based generations
-MAX_TOKENS_SHORT = 4096      # Max tokens for pure reasoning (saves budget for more gens)
+MAX_TOKENS = 4096            # Unified token limit for ALL generations
 TOTAL_TIME_BUDGET = 17700    # 4h55m in seconds (5min safety margin)
 SETUP_TIME = 300             # Model loading time
 CODE_EXEC_TIMEOUT = 30       # Timeout for SymPy verification
@@ -780,15 +779,11 @@ class AIMOSolver:
         return int(hashlib.sha256(problem.encode()).hexdigest()[:8], 16) % (2**31)
 
     def _dynamic_gen_count(self, time_budget: float) -> int:
-        """Adjust generation count based on available time budget.
-        
-        When ahead of schedule → generate more (up to MAX_GENERATIONS)
-        When behind schedule → generate fewer (down to MIN_GENERATIONS)
-        """
-        # Average ~35s per generation on H100 for 4K tokens (measured empirically)
-        est_time_per_gen = 35
-        # Reserve time for retry (30s) + verification (20s) + buffer (20s)
-        available = time_budget - 70
+        """Adjust generation count based on available time budget."""
+        # ~50s per generation on H100 for 4K tokens (empirical with <think> overhead)
+        est_time_per_gen = 50
+        # Reserve 30s buffer for retry + overhead
+        available = time_budget - 30
         max_by_time = max(MIN_GENERATIONS, int(available / est_time_per_gen))
         return min(max_by_time, MAX_GENERATIONS)
 
@@ -821,7 +816,7 @@ class AIMOSolver:
         prob_seed = self._problem_seed(problem)
         few_shot = get_few_shot_examples(prob_type)
 
-        # Phase 1: Deterministic generation (temperature=0)
+        # Phase 1: Deterministic generation (temperature=0, CODE_TEMPLATE)
         det_answer = None
         if time.time() - start < time_budget - 20:
             fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
@@ -833,14 +828,24 @@ class AIMOSolver:
                 all_answers.append(ta)
                 code_answers.append(ca)
                 if det_answer is None:
-                    det_answer = ca if ca is not None else ta  # prefer code-verified
+                    det_answer = ca if ca is not None else ta
 
-        # Phase 2: First batch — diverse exploration (temp=0.6)
-        num_diverse = effective_gens - 1
-        batch1_size = min(4, num_diverse)
-        if batch1_size > 0 and time.time() - start < time_budget - 20:
+        # Early exit: if det gen has code+text agreement, accept immediately
+        if len(all_answers) == 1 and all_answers[0] is not None and code_answers[0] is not None:
+            if all_answers[0] == code_answers[0]:
+                logger.info(f"  Early exit: det code+text agree = {all_answers[0]}")
+                # Skip to final processing below
+                all_answers = all_answers  # no-op, just skip Phase 2+3
+            else:
+                # Disagreement — need diversity
+                pass
+
+        # Phase 2: Diverse batch (temp=0.6) — only if not already converged
+        _, early_conf = weighted_vote(all_answers, code_answers)
+        batch_size = min(2, effective_gens - 1)
+        if early_conf < 0.9 and batch_size > 0 and time.time() - start < time_budget - 20:
             prompts = []
-            for i in range(batch1_size):
+            for i in range(batch_size):
                 tmpl = templates[i % len(templates)]
                 fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
                 if '{few_shot}' in tmpl:
@@ -853,80 +858,27 @@ class AIMOSolver:
                 all_answers.append(extract_answer(t))
                 code_answers.append(verify_with_code(t))
 
-        # Early exit: if deterministic + batch1 have high consensus, skip further work
-        _, early_conf = weighted_vote(all_answers, code_answers)
-        if early_conf >= 0.7:
-            logger.info(f"  Early exit after batch1: conf={early_conf:.2f}")
-        else:
-            # Phase 2b: Second batch — adaptive temperature
-            batch2_size = num_diverse - batch1_size
-            if batch2_size > 0 and time.time() - start < time_budget - 20:
-                # Check consensus from first batch to pick temperature
-                _, b2_conf = weighted_vote(all_answers, code_answers)
-                if b2_conf >= 0.6 and self.sp_refine_factory:
-                    sp_batch2 = self.sp_refine_factory(prob_seed + 50)
-                    logger.info(f"  Batch2: REFINE mode (conf={b2_conf:.2f}, temp=0.3)")
-                elif b2_conf < 0.3 and self.sp_explore_factory:
-                    sp_batch2 = self.sp_explore_factory(prob_seed + 50)
-                    logger.info(f"  Batch2: EXPLORE mode (conf={b2_conf:.2f}, temp=0.9)")
-                else:
-                    sp_batch2 = self.sp_div_factory(prob_seed + 50)
-                    logger.info(f"  Batch2: STANDARD mode (conf={b2_conf:.2f}, temp=0.6)")
-                
-                prompts = []
-                for i in range(batch2_size):
-                    tmpl = templates[(batch1_size + i) % len(templates)]
-                    fmt_kwargs = dict(system=SYSTEM_PROMPT, problem=problem)
-                    if '{few_shot}' in tmpl:
-                        fmt_kwargs['few_shot'] = few_shot
-                    prompts.append(tmpl.format(**fmt_kwargs))
-                
-                texts = self._gen(prompts, sp_batch2)
-                for t in texts:
-                    all_answers.append(extract_answer(t))
-                    code_answers.append(verify_with_code(t))
-
-            # Phase 3: Retry on low confidence (1 round max to save time)
-            best, conf = weighted_vote(all_answers, code_answers)
-            if conf < 0.4 and time.time() - start < time_budget - 30:
-                valid = [a for a in all_answers if a is not None]
-                candidate_info = ""
-                if valid:
-                    dist = Counter(valid).most_common(3)
-                    candidate_info = ", ".join(f"{v} ({c} votes)" for v, c in dist)
-                
-                prompt = RETRY_TEMPLATE.format(
-                    system=SYSTEM_PROMPT, problem=problem,
-                    previous_answer=candidate_info if candidate_info else "unknown",
-                    few_shot=few_shot
-                )
-                sp_retry = self.sp_div_factory(prob_seed + 100)
-                texts = self._gen([prompt], sp_retry)
-                for t in texts:
-                    all_answers.append(extract_answer(t))
-                    code_answers.append(verify_with_code(t))
-                best, conf = weighted_vote(all_answers, code_answers)
-                logger.info(f"  Retry: best={best}, conf={conf:.2f}")
-
-        # Phase 4: Verification — only when plenty of time and low confidence
-        best_candidate = select_answer(all_answers, code_answers)
-        _, pre_verify_conf = weighted_vote(all_answers, code_answers)
-        if (pre_verify_conf < 0.5
-            and best_candidate != 0
-            and time.time() - start < time_budget * 0.6):
-            verify_prompt = VERIFY_TEMPLATE.format(
+        # Phase 3: Retry — only on very low confidence and if time permits
+        best, conf = weighted_vote(all_answers, code_answers)
+        if conf < 0.2 and time.time() - start < time_budget - 40:
+            valid = [a for a in all_answers if a is not None]
+            candidate_info = ""
+            if valid:
+                dist = Counter(valid).most_common(3)
+                candidate_info = ", ".join(f"{v} ({c} votes)" for v, c in dist)
+            
+            prompt = RETRY_TEMPLATE.format(
                 system=SYSTEM_PROMPT, problem=problem,
-                candidate_answer=best_candidate
+                previous_answer=candidate_info if candidate_info else "unknown",
+                few_shot=few_shot
             )
-            sp_verify = self.sp_div_factory(prob_seed + 200)
-            texts = self._gen([verify_prompt], sp_verify)
+            sp_retry = self.sp_div_factory(prob_seed + 100)
+            texts = self._gen([prompt], sp_retry)
             for t in texts:
-                v_text = extract_answer(t)
-                v_code = verify_with_code(t)
-                if v_text is not None or v_code is not None:
-                    all_answers.append(v_text)
-                    code_answers.append(v_code)
-            logger.info(f"  Verification: pre_conf={pre_verify_conf:.2f}")
+                all_answers.append(extract_answer(t))
+                code_answers.append(verify_with_code(t))
+            best, conf = weighted_vote(all_answers, code_answers)
+            logger.info(f"  Retry: best={best}, conf={conf:.2f}")
 
         # Pre-vote modulus reduction: reduce any extracted answer >= modulus
         if modulus and modulus > 1:
@@ -1024,7 +976,7 @@ def main():
     sp_det = SamplingParams(
         temperature=0.0,
         top_p=1.0,
-        max_tokens=MAX_TOKENS_CODE,
+        max_tokens=MAX_TOKENS,
         stop=["</s>", "<|endoftext|>", "<|im_end|>"],
     )
 
@@ -1039,7 +991,7 @@ def main():
             temperature=0.6,
             top_p=0.95,
             top_k=50,
-            max_tokens=MAX_TOKENS_SHORT,
+            max_tokens=MAX_TOKENS,
             seed=seed,
             stop=["</s>", "<|endoftext|>", "<|im_end|>"],
         )
@@ -1061,7 +1013,7 @@ def main():
             temperature=0.9,
             top_p=0.98,
             top_k=80,
-            max_tokens=MAX_TOKENS_SHORT,
+            max_tokens=MAX_TOKENS,
             seed=seed,
             stop=["</s>", "<|endoftext|>", "<|im_end|>"],
         )
@@ -1072,7 +1024,7 @@ def main():
             temperature=0.3,
             top_p=0.90,
             top_k=30,
-            max_tokens=MAX_TOKENS_SHORT,
+            max_tokens=MAX_TOKENS,
             seed=seed,
             stop=["</s>", "<|endoftext|>", "<|im_end|>"],
         )
