@@ -1,0 +1,17 @@
+# AIMO3 Competition Dependencies
+# Core inference
+vllm>=0.7.0
+sympy>=1.12
+transformers>=4.40.0
+torch>=2.2.0
+
+# Data handling (used by Kaggle evaluation API)
+polars>=0.20.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Evaluation API
+grpcio>=1.60.0
+
+# Development/testing only
+pytest>=7.0.0
